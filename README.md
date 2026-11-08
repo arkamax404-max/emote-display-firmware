@@ -126,12 +126,17 @@ Se mantiene la paleta original y el orden RGB. Se probó subir Protomatter de 4 
 
 El emisor local tiene ahora `externalDisplay.outline: "#808080"`: contorno externo blanco apagado de 1 px; se conserva la paleta del sprite sobre la silueta, sin afectar a las etiquetas ni al firmware. Aplicar con `/reload`. En sprites opacos se infiere la silueta usando negro puro como fondo; en sprites con transparencia se usa alfa. Los huecos internos cerrados no se contornean. El borde puede recortarse si la figura toca la primera fila del PNG.
 
-## Botón UP: información Wi-Fi
+## Botón UP: información Wi-Fi y emisores
 
-Actualización cargada y flash verificada. `/health` confirma `wifiInfo: false` y recepción de nuevos frames tras arrancar; funcionamiento del botón y pantalla Wi-Fi confirmado por el usuario. El botón **UP (GPIO6, activo bajo)** muestra información durante **15 segundos**, alternando cada 5 segundos:
+El botón **UP (GPIO6, activo bajo)** muestra estas páginas en orden, **5 segundos por página**:
 
 - Estado de conexión, **IP asignada** y señal RSSI. La IP se reparte en dos líneas para que quepa completa: `192.168.` + `1.227` = `192.168.1.227`.
 - SSID completo (hasta 32 bytes) y estado. Caracteres no soportados por la fuente ASCII se muestran como `?`.
+- Emisores: una página por IP de origen, con IP completa en dos líneas y contador `REQUESTS`. Si aún no hay emisores indica `SENDERS / NONE YET`. La duración total es de **15 a 50 segundos**, según los emisores registrados; si aparece uno nuevo durante la consulta se amplía hasta incluirlo.
+
+Se conservan las **primeras 8 IPv4 distintas** en RAM, en orden de llegada, sin expulsar ninguna. `MORE IPS!` indica que hubo intentos de otras IP que no se almacenaron. Cada contador se satura en **4294967295**, sin volver a cero. Los datos se borran al reiniciar; no se guardan en NVS. La IP procede exclusivamente de la conexión TCP, no de cabeceras enviadas por el cliente.
+
+Se cuenta **una vez por conexión**, en cuanto llega la primera línea completa y exacta `POST /emote HTTP/1.0\r\n` o `POST /emote HTTP/1.1\r\n` (los caracteres `\r\n` representan CRLF). Cuenta todos esos intentos, aunque después fallen las cabeceras —incluidos caracteres inválidos—, el PNG, el cuerpo incompleto o el timeout. Una línea inicial incompleta, no identificable o no soportada no cuenta. Tampoco cuentan `/health`, otras rutas ni otros métodos. El contador `frames` de `/health` sigue contando solo imágenes aceptadas. Firmware cargado por USB con hash de escritura verificado; funcionamiento de la nueva sección de emisores confirmado visualmente por el usuario sobre la placa.
 
 Otra pulsación de UP cierra la pantalla antes del timeout. Al terminar vuelve al **último frame recibido**, no a una imagen antigua. Los POST, el contador y la autorrotación siguen activos mientras se muestra la información. No muestra ni registra la contraseña. Si no hay conexión indica `NO WIFI / NO IP`. El botón DOWN queda libre y BOOT/RESET no se modifican. `/health` añade `wifiInfo` para indicar si la pantalla informativa está visible.
 

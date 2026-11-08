@@ -36,6 +36,9 @@ static uint32_t requestStarted = 0;
 static bool listening = false;
 static String ssid, password;
 static WifiInfoOverlay wifiInfo;
+static SenderStats senderStats;
+static SenderConnection senderConnection;
+static uint32_t senderIp = 0;
 
 static void renderDisplay() {
   matrix.setRotation(orientation.rotation());
@@ -44,7 +47,7 @@ static void renderDisplay() {
     const bool connected = WiFi.status() == WL_CONNECTED;
     const auto lines = wifiInfoLines(wifiInfo.page(), connected, ssid.c_str(),
                                      connected ? WiFi.localIP().toString().c_str() : "",
-                                     connected ? WiFi.RSSI() : 0);
+                                     connected ? WiFi.RSSI() : 0, &senderStats);
     matrix.setTextWrap(false);
     matrix.setTextSize(1);
     for (size_t row = 0; row < lines.size(); ++row) {
@@ -125,7 +128,7 @@ static void pollOrientation() {
 static void pollWifiInfoButton() {
   static uint32_t lastRefresh = 0;
   const uint32_t now = millis();
-  const bool changed = wifiInfo.update(digitalRead(PIN_BUTTON_UP) == LOW, now);
+  const bool changed = wifiInfo.update(digitalRead(PIN_BUTTON_UP) == LOW, now, senderStats.size());
   if (changed || (wifiInfo.visible() && uint32_t(now - lastRefresh) >= 1000)) {
     lastRefresh = now;
     renderDisplay();
@@ -133,6 +136,7 @@ static void pollWifiInfoButton() {
 }
 
 static void closeRequest() {
+  senderConnection.reset();
   client.stop();
   headers.clear();
   received = 0;
@@ -153,6 +157,9 @@ static void pollHttp() {
     closeRequest();
     client = server.available();
     if (!client) return;
+    const IPAddress remote = client.remoteIP();
+    senderIp = (uint32_t(remote[0]) << 24) | (uint32_t(remote[1]) << 16) |
+               (uint32_t(remote[2]) << 8) | uint32_t(remote[3]);
     requestStarted = millis();
     client.setTimeout(1); // Arduino-ESP32 WiFiClient takes seconds, not milliseconds.
   }
@@ -161,6 +168,7 @@ static void pollHttp() {
     const int value = client.read();
     if (value < 0) break;
     if (!readingBody) {
+      senderConnection.feed(static_cast<char>(value), senderIp, senderStats);
       if (value == 0 || (value < 32 && value != '\r' && value != '\n' && value != '\t') || value > 126) {
         reply(400, "{\"error\":\"invalid headers\"}"); return;
       }

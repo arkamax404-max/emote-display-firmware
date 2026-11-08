@@ -2,15 +2,16 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include "sender_stats.h"
 
-/** Debounced UP button, with a temporary two-page overlay. No blocking delays. */
+/** Debounced UP button with Wi-Fi pages followed by sender pages. No delays. */
 class WifiInfoOverlay {
  public:
   static constexpr uint32_t DEBOUNCE_MS = 35;
   static constexpr uint32_t DURATION_MS = 15000;
   static constexpr uint32_t PAGE_MS = 5000;
 
-  bool update(bool pressed, uint32_t now) {
+  bool update(bool pressed, uint32_t now, size_t senderCount = 0) {
     const bool before = visible_;
     const uint8_t beforePage = page_;
     if (pressed != raw_) { raw_ = pressed; rawSince_ = now; }
@@ -18,8 +19,10 @@ class WifiInfoOverlay {
       stable_ = raw_;
       if (stable_) { visible_ = !visible_; started_ = now; }
     }
-    if (visible_ && uint32_t(now - started_) >= DURATION_MS) visible_ = false;
-    page_ = visible_ ? (uint32_t(now - started_) / PAGE_MS) % 2 : 0;
+    const size_t boundedCount = senderCount > SenderStats::CAPACITY ? SenderStats::CAPACITY : senderCount;
+    const uint32_t pages = 2 + (boundedCount ? boundedCount : 1);
+    if (visible_ && uint32_t(now - started_) >= pages * PAGE_MS) visible_ = false;
+    page_ = visible_ ? uint32_t(now - started_) / PAGE_MS : 0;
     return before != visible_ || beforePage != page_;
   }
   bool visible() const { return visible_; }
@@ -44,9 +47,28 @@ inline std::string wifiInfoAscii(const std::string &value) {
 
 inline std::array<std::string, 7> wifiInfoLines(uint8_t page, bool connected,
                                               const std::string &ssid,
-                                              const std::string &ip, int rssi) {
+                                              const std::string &ip, int rssi,
+                                              const SenderStats *senders = nullptr) {
   std::array<std::string, 7> lines{};
-  if (page == 1) {
+  if (page >= 2) {
+    lines[0] = "SENDERS";
+    const size_t index = page - 2;
+    if (!senders || index >= senders->size()) {
+      lines[2] = "NONE YET";
+    } else {
+      const auto &sender = senders->at(index);
+      lines[0] = "SENDER " + std::to_string(index + 1) + "/" + std::to_string(senders->size());
+      const std::string address = std::to_string((sender.ip >> 24) & 255) + "." +
+          std::to_string((sender.ip >> 16) & 255) + "." +
+          std::to_string((sender.ip >> 8) & 255) + "." + std::to_string(sender.ip & 255);
+      const auto ipLines = wifiInfoLines(0, true, "", address, 0);
+      lines[1] = ipLines[2];
+      lines[2] = ipLines[3];
+      lines[3] = "REQUESTS";
+      lines[4] = std::to_string(sender.requests);
+    }
+    if (senders && senders->overflow()) lines[5] = "MORE IPS!";
+  } else if (page == 1) {
     lines[0] = "SSID:";
     const std::string name = ssid.empty() ? "(UNSET)" : wifiInfoAscii(ssid).substr(0, 32);
     for (size_t row = 0; row < 4; ++row) {
