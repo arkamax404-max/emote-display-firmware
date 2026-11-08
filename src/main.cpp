@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include "orientation.h"
 #include "display_settings.h"
+#include "wifi_info.h"
 #include <ESPmDNS.h>
 #include "frame_decoder.h"
 #include <Preferences.h>
@@ -34,10 +35,26 @@ static bool readingBody = false;
 static uint32_t requestStarted = 0;
 static bool listening = false;
 static String ssid, password;
+static WifiInfoOverlay wifiInfo;
 
 static void renderDisplay() {
   matrix.setRotation(orientation.rotation());
   matrix.fillScreen(0); // Clear the top margin after every redraw/rotation.
+  if (wifiInfo.visible()) {
+    const bool connected = WiFi.status() == WL_CONNECTED;
+    const auto lines = wifiInfoLines(wifiInfo.page(), connected, ssid.c_str(),
+                                     connected ? WiFi.localIP().toString().c_str() : "",
+                                     connected ? WiFi.RSSI() : 0);
+    matrix.setTextWrap(false);
+    matrix.setTextSize(1);
+    for (size_t row = 0; row < lines.size(); ++row) {
+      matrix.setTextColor(panel::color(row == 0 ? matrix.color565(128, 255, 255) : matrix.color565(224, 224, 224)));
+      matrix.setCursor(2, panel::TOP_OFFSET + row * 8);
+      matrix.print(lines[row].c_str());
+    }
+    matrix.show();
+    return;
+  }
   if (!hasFrame) {
     matrix.setTextWrap(false);
     matrix.setTextColor(panel::color(matrix.color565(128, 192, 128)));
@@ -105,6 +122,16 @@ static void pollOrientation() {
   }
 }
 
+static void pollWifiInfoButton() {
+  static uint32_t lastRefresh = 0;
+  const uint32_t now = millis();
+  const bool changed = wifiInfo.update(digitalRead(PIN_BUTTON_UP) == LOW, now);
+  if (changed || (wifiInfo.visible() && uint32_t(now - lastRefresh) >= 1000)) {
+    lastRefresh = now;
+    renderDisplay();
+  }
+}
+
 static void closeRequest() {
   client.stop();
   headers.clear();
@@ -145,7 +172,8 @@ static void pollHttp() {
       if (request.health) {
         reply(200, "{\"ok\":true,\"width\":64,\"height\":64,\"frames\":" + String(accepted) +
             ",\"brightness\":" + String(panel::BRIGHTNESS) + ",\"topOffset\":" + String(panel::TOP_OFFSET) +
-            ",\"bitDepth\":" + String(panel::BIT_DEPTH) + ",\"accelerometer\":" + (accelerometerReady ? "true" : "false") +
+            ",\"bitDepth\":" + String(panel::BIT_DEPTH) + ",\"wifiInfo\":" + (wifiInfo.visible() ? "true" : "false") +
+            ",\"accelerometer\":" + (accelerometerReady ? "true" : "false") +
             ",\"rotation\":" + String(orientation.rotation() * 90) +
             ",\"orientationCalibrated\":" + (orientation.reference() >= 0 ? "true" : "false") + "}"); return;
       }
@@ -233,6 +261,7 @@ static void pollWifi() {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(PIN_BUTTON_UP, INPUT_PULLUP); // MatrixPortal S3 UP button: GPIO6, active low.
   const ProtomatterStatus status = matrix.begin();
   if (status != PROTOMATTER_OK) {
     for (;;) { Serial.printf("Matrix initialization failed: %d\n", static_cast<int>(status)); delay(1000); }
@@ -270,6 +299,7 @@ void setup() {
 void loop() {
   pollProvisioning();
   pollOrientation();
+  pollWifiInfoButton();
   pollWifi();
   delay(1);
 }

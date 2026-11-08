@@ -71,7 +71,7 @@ Recargar gentle-emote con `/reload` **después de configurar el Wi-Fi** y probar
 
 ## API y límites
 
-- `GET /health` → JSON con `ok`, `width`, `height`, contador `frames`, `brightness` (0–255), `topOffset` (px), `bitDepth`, `accelerometer` (detectado), `rotation` (0/90/180/270) y `orientationCalibrated`.
+- `GET /health` → JSON con `ok`, `width`, `height`, contador `frames`, `brightness` (0–255), `topOffset` (px), `bitDepth`, `wifiInfo` (pantalla informativa visible), `accelerometer` (detectado), `rotation` (0/90/180/270) y `orientationCalibrated`.
 - `POST /emote`: `Content-Type: image/png`, `X-Emote-Version: 1`, `Content-Length` obligatorio.
 - PNG **64×64, RGBA de 8 bits, sin entrelazado**, chunks IHDR/IDAT/IEND (formato exacto producido por gentle-emote). No admite PNG arbitrarios con paleta, RGB, metadatos o chunks auxiliares.
 - Máximo **32 KiB** de cuerpo, **4 KiB** de cabeceras y **2,5 s** totales por petición. No admite `Transfer-Encoding`, `Expect`, keep-alive ni pipelining. Conexión cerrada tras responder.
@@ -89,6 +89,15 @@ Se mantiene la paleta original y el orden RGB. Se probó subir Protomatter de 4 
 **Fondo gris descartado por el usuario.** Se retiraron `background` y `backgroundCoverage` de la configuración local del emisor para restaurar el fondo negro predeterminado; aplicar con `/reload`, sin cambiar firmware. Se conserva el soporte opcional y sus tests. Durante la prueba, `#303030` se veía rosa por pérdida del verde al cuantizar; se probaron `#383838` y tramado estático al 75%, pero finalmente se decidió volver al negro.
 
 El emisor local tiene ahora `externalDisplay.outline: "#808080"`: contorno externo blanco apagado de 1 px; se conserva la paleta del sprite sobre la silueta, sin afectar a las etiquetas ni al firmware. Aplicar con `/reload`. En sprites opacos se infiere la silueta usando negro puro como fondo; en sprites con transparencia se usa alfa. Los huecos internos cerrados no se contornean. El borde puede recortarse si la figura toca la primera fila del PNG.
+
+## Botón UP: información Wi-Fi
+
+Actualización cargada y flash verificada. `/health` confirma `wifiInfo: false` y recepción de nuevos frames tras arrancar; funcionamiento del botón y pantalla Wi-Fi confirmado por el usuario. El botón **UP (GPIO6, activo bajo)** muestra información durante **15 segundos**, alternando cada 5 segundos:
+
+- Estado de conexión, **IP asignada** y señal RSSI. La IP se reparte en dos líneas para que quepa completa: `192.168.` + `1.227` = `192.168.1.227`.
+- SSID completo (hasta 32 bytes) y estado. Caracteres no soportados por la fuente ASCII se muestran como `?`.
+
+Otra pulsación de UP cierra la pantalla antes del timeout. Al terminar vuelve al **último frame recibido**, no a una imagen antigua. Los POST, el contador y la autorrotación siguen activos mientras se muestra la información. No muestra ni registra la contraseña. Si no hay conexión indica `NO WIFI / NO IP`. El botón DOWN queda libre y BOOT/RESET no se modifican. `/health` añade `wifiInfo` para indicar si la pantalla informativa está visible.
 
 ## Rotación automática
 
