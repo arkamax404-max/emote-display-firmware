@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pio/
+.venv/
+.env
+.env.*
+!.env.example
+sdkconfig.old
+build/
