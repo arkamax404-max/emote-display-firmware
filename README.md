@@ -36,13 +36,49 @@ PlatformIO gestiona las herramientas en `~/.platformio`, sin Arduino IDE ni ESP-
 
 ## Configurar Wi-Fi sin guardar secretos en el repo
 
-Una vez cargado, el panel muestra `SET WIFI / VIA USB` si no hay credenciales:
+**Cambiar el SSID o la contraseña no requiere recompilar ni actualizar el firmware.** Conectar la placa al equipo con un cable USB de datos, ejecutando normalmente este firmware: **no pulsar BOOT ni entrar en modo de carga**. Cerrar antes cualquier monitor serie u otro programa que use el puerto.
+
+El panel muestra `SET WIFI / VIA USB` si aún no hay credenciales, pero el asistente también sirve para sustituir una red ya guardada, incluso sin conexión a la red anterior.
+
+### macOS
+
+Desde la raíz del repositorio, con el entorno `.venv` preparado:
 
 ```sh
+# Identificar el puerto de la MatrixPortal:
+.venv/bin/python -m serial.tools.list_ports -v
+
+# Sustituir el puerto si es diferente:
 .venv/bin/python scripts/provision_wifi.py --port /dev/cu.usbmodem14101
 ```
 
-El asistente pide SSID y contraseña (oculta), los envía por USB y los guarda en NVS en la placa, que reinicia. Usar una red **2,4 GHz**. No se guardan en archivos ni argumentos de shell. NVS no está cifrada: quien tenga acceso físico a la placa puede extraer las credenciales. Para cambiar de red, repetir el asistente. Solo se admiten redes personales/abiertas, no Wi-Fi Enterprise ni portales cautivos.
+### Windows (PowerShell)
+
+Instalar Python 3 y abrir una terminal en la raíz del repositorio. Si solo se desea cambiar el Wi-Fi, basta con Python y pyserial; no hace falta instalar PlatformIO ni el compilador:
+
+```powershell
+# Solo si aún no existe el entorno:
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install pyserial==3.5
+
+# Identificar el puerto de la MatrixPortal:
+.\.venv\Scripts\python.exe -m serial.tools.list_ports -v
+
+# Sustituir COM3 por el puerto detectado:
+.\.venv\Scripts\python.exe scripts\provision_wifi.py --port COM3
+```
+
+También se puede consultar el puerto en el Administrador de dispositivos, sección **Puertos (COM y LPT)**. No hay que activar el entorno virtual para usar estos comandos. La conexión USB y el asistente se han probado en macOS; Windows queda pendiente de validación física.
+
+### Guardado y nueva IP
+
+1. El asistente pide el **SSID** y la **contraseña**, que se introduce oculta.
+2. Envía los datos por USB, los guarda en **NVS en la placa** y la reinicia. Persisten al desconectar la alimentación.
+3. Usar una red **2,4 GHz**. Solo se admiten redes personales/abiertas, no Wi-Fi Enterprise ni portales cautivos.
+4. Tras conectar, pulsar **UP** para consultar la nueva IP. La dirección se muestra en dos líneas que deben unirse.
+5. Actualizar la URL del destino ESP32 en `.pi/extensions/gentle-emote/config.json`, por ejemplo `http://192.168.1.227/emote`, y ejecutar **`/reload`** en el plugin. El equipo y la placa deben estar en la misma red accesible.
+
+No se guardan las credenciales en archivos del proyecto ni argumentos de shell. NVS no está cifrada: quien tenga acceso físico a la placa puede extraerlas. Para cambiar de red otra vez, repetir el asistente.
 
 ```sh
 .venv/bin/pio device monitor --port /dev/cu.usbmodem14101 --baud 115200
