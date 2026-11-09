@@ -11,6 +11,7 @@
 #include <WiFi.h>
 #include "receiver_protocol.h"
 #include "idle_clock_image.h"
+#include "firmware_version.h"
 
 static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
@@ -85,6 +86,7 @@ static void renderDisplay() {
     matrix.setTextColor(panel::color(matrix.color565(128, 128, 128)));
     matrix.setCursor(2, 28 + panel::TOP_OFFSET);
     matrix.print(messageSecond);
+    firmware::drawVersion(matrix, messageFirst, messageSecond);
     matrix.show();
     return;
   }

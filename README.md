@@ -20,6 +20,7 @@ Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen 
 El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
 
 - Al arrancar, conserva los diagnósticos hasta disponer de una hora válida. Sin un PNG previo, muestra entonces el reloj.
+- La pantalla de espera `READY / SEND PNG` añade **v1.0.0** debajo de `SEND PNG`. La versión solo aparece en esa pantalla, no en los otros diagnósticos, el reloj, los PNG ni la información Wi-Fi. Conserva el brillo, el margen y la rotación actuales. Es un cambio local aún no cargado ni verificado físicamente.
 - Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
 - Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
 - Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
