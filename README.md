@@ -28,6 +28,10 @@ El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya
 
 **La implementación y sus pruebas locales no equivalen a una validación física.** Esta actualización aún no se ha cargado: quedan por comprobar NTP real, visibilidad y estabilidad en la placa. Entrar en bootloader o subir firmware es un paso separado.
 
+## Continuar el reloj desde el Mac
+
+La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. El firmware del reloj aún no está instalado; no aplicar automáticamente el upload genérico de la sección siguiente a esta actualización.
+
 ## Compilar y cargar
 
 Mac Intel con macOS 14.8.7, Apple Command Line Tools y Python 3.13 de Homebrew. No modificar el Python 3.9 del sistema.
