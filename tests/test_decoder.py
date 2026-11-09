@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -19,9 +20,14 @@ class DecoderTests(unittest.TestCase):
         objects = []
         for name in ["adler32", "crc32", "inflate", "inffast", "inftrees", "zutil"]:
             obj = temp / f"{name}.o"
-            subprocess.run(["clang", "-w", "-I", str(source), "-c", str(source / f"{name}.c"), "-o", str(obj)], check=True)
+            cmd = ["clang", "-w", "-I", str(source), "-c", str(source / f"{name}.c"), "-o", str(obj)]
+            if name == "inflate":
+                cmd += ["-include", str(ROOT / "tests/pngdec_uint_compat.h")]
+            subprocess.run(cmd, check=True)
             objects.append(str(obj))
-        subprocess.run(["clang++", "-std=c++11", "-w", "-I", str(ROOT / "include"), "-I", str(source),
+        subprocess.run(["clang++", "-std=c++11", "-w",
+                        *( ["-D__LINUX__"] if os.name == "nt" else [] ),  # Windows host: select PNGdec's own desktop path; avoids vendored Arduino.h dependency.
+                        "-I", str(ROOT / "include"), "-I", str(source),
                         str(ROOT / "tests/decoder_cli.cpp"), str(source / "PNGdec.cpp"), *objects,
                         "-o", str(cls.binary)], check=True)
 

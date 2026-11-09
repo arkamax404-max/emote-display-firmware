@@ -10,6 +10,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "receiver_protocol.h"
+#include "idle_clock_image.h"
 
 static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
@@ -39,8 +40,19 @@ static WifiInfoOverlay wifiInfo;
 static SenderStats senderStats;
 static SenderConnection senderConnection;
 static uint32_t senderIp = 0;
+static idle_clock::State clockState;
+static bool clockConfigured = false;
+
+static bool readClock(std::tm &calendar, std::time_t &epoch) {
+  epoch = std::time(nullptr);
+  return localtime_r(&epoch, &calendar) && calendar.tm_year > 116;
+}
 
 static void renderDisplay() {
+  std::tm calendar = {};
+  std::time_t epoch = 0;
+  const auto source = clockState.source(millis(), readClock(calendar, epoch), hasFrame, wifiInfo.visible());
+  clockState.painted(millis(), source);
   matrix.setRotation(orientation.rotation());
   matrix.fillScreen(0); // Clear the top margin after every redraw/rotation.
   if (wifiInfo.visible()) {
@@ -55,6 +67,13 @@ static void renderDisplay() {
       matrix.setCursor(2, panel::TOP_OFFSET + row * 8);
       matrix.print(lines[row].c_str());
     }
+    matrix.show();
+    return;
+  }
+  if (source == idle_clock::Source::Clock) {
+    idle_clock::draw(calendar, uint64_t(epoch), [](int x, int y, uint16_t color) {
+      matrix.drawPixel(x, y + panel::TOP_OFFSET, panel::color(color));
+    });
     matrix.show();
     return;
   }
@@ -77,6 +96,14 @@ static void renderDisplay() {
   matrix.show();
 }
 
+static void pollClock() {
+  std::tm calendar = {};
+  std::time_t epoch = 0;
+  const uint32_t now = millis();
+  const auto source = clockState.source(now, readClock(calendar, epoch), hasFrame, wifiInfo.visible());
+  if (clockState.redrawDue(now, source)) renderDisplay();
+}
+
 static void displayMessage(const char *first, const char *second) {
   messageFirst = first;
   messageSecond = second;
@@ -85,7 +112,9 @@ static void displayMessage(const char *first, const char *second) {
 }
 
 static bool showPng() {
-  if (!frameDecoder.decode(pngBytes, received)) return false;
+  const bool decoded = frameDecoder.decode(pngBytes, received);
+  clockState.pngResult(decoded, millis());
+  if (!decoded) return false;
   // Separate from decode staging so invalid PNGs cannot corrupt later redraws.
   memcpy(lastFrame, frameDecoder.pixels(), sizeof(lastFrame));
   hasFrame = true;
@@ -255,6 +284,10 @@ static void pollWifi() {
     return;
   }
   if (!listening) {
+    if (!clockConfigured) {
+      configTzTime(idle_clock::TIMEZONE, "pool.ntp.org", "time.cloudflare.com");
+      clockConfigured = true; // SDK resynchronizes asynchronously over existing Wi-Fi.
+    }
     server.begin();
     server.setNoDelay(true);
     listening = true;
@@ -292,6 +325,8 @@ void setup() {
   }
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  setenv("TZ", idle_clock::TIMEZONE, 1);
+  tzset(); // Also use Madrid if the powered RTC survives an offline soft restart.
   WiFi.setHostname("gentle-matrix");
   if (ssid.isEmpty()) {
     displayMessage("SET WIFI", "VIA USB");
@@ -309,5 +344,6 @@ void loop() {
   pollOrientation();
   pollWifiInfoButton();
   pollWifi();
+  pollClock();
   delay(1);
 }
