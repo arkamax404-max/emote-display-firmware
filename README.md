@@ -15,6 +15,19 @@ Receptor de PNG para **Adafruit MatrixPortal ESP32-S3 + HUB75 de 64×64**, compa
 
 Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen superior de **3 px** y profundidad de color de **6 bits/canal** en Protomatter. `/health` confirma los tres valores, acelerómetro activo, referencia conservada y recepción de frames tras reiniciar. El usuario observó temblor/parpadeo tras esta actualización. Se ha cargado y verificado la vuelta a **4 bits/canal**, conservando brillo 25% y margen 3 px, para aislar la profundidad de color como posible causa. `/health` confirma `bitDepth: 4`, `brightness: 64`, `topOffset: 3`, acelerómetro activo y recepción de frames; pendiente de confirmación visual de estabilidad.
 
+## Reloj autónomo (actualización local, aún no cargada)
+
+El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
+
+- Al arrancar, conserva los diagnósticos hasta disponer de una hora válida. Sin un PNG previo, muestra entonces el reloj.
+- Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
+- Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
+- Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
+- Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando, con refresco nominal de 1 Hz. Se conservan brillo, rotación y margen superior; los pies y el camino caben en las 61 filas lógicas visibles, sin otro framebuffer.
+- La pantalla informativa de Wi-Fi tiene prioridad. Al cerrarla muestra el PNG todavía vigente o el reloj, según corresponda.
+
+**La implementación y sus pruebas locales no equivalen a una validación física.** Esta actualización aún no se ha cargado: quedan por comprobar NTP real, visibilidad y estabilidad en la placa. Entrar en bootloader o subir firmware es un paso separado.
+
 ## Compilar y cargar
 
 Mac Intel con macOS 14.8.7, Apple Command Line Tools y Python 3.13 de Homebrew. No modificar el Python 3.9 del sistema.
@@ -133,7 +146,7 @@ Actualización cargada y flash verificada. `/health` confirma `wifiInfo: false` 
 - Estado de conexión, **IP asignada** y señal RSSI. La IP se reparte en dos líneas para que quepa completa: `192.168.` + `1.227` = `192.168.1.227`.
 - SSID completo (hasta 32 bytes) y estado. Caracteres no soportados por la fuente ASCII se muestran como `?`.
 
-Otra pulsación de UP cierra la pantalla antes del timeout. Al terminar vuelve al **último frame recibido**, no a una imagen antigua. Los POST, el contador y la autorrotación siguen activos mientras se muestra la información. No muestra ni registra la contraseña. Si no hay conexión indica `NO WIFI / NO IP`. El botón DOWN queda libre y BOOT/RESET no se modifican. `/health` añade `wifiInfo` para indicar si la pantalla informativa está visible.
+Otra pulsación de UP cierra la pantalla antes del timeout. Al terminar vuelve al **último frame recibido** si sigue vigente; si han pasado 10 segundos y hay hora válida, muestra el reloj. Los POST, el contador y la autorrotación siguen activos mientras se muestra la información. No muestra ni registra la contraseña. Si no hay conexión indica `NO WIFI / NO IP`. El botón DOWN queda libre y BOOT/RESET no se modifican. `/health` añade `wifiInfo` para indicar si la pantalla informativa está visible.
 
 ## Rotación automática
 
@@ -141,7 +154,7 @@ Usa el **LIS3DH** integrado, I²C `0x19`, SDA GPIO16 / SCL GPIO17. Muestrea cada
 
 **En el primer arranque de esta actualización**, sostener el panel vertical y con su posición habitual correcta: la primera postura estable se guarda como referencia en NVS. La referencia persiste entre reinicios, también si se arranca con el panel girado. El sensor ya se ha detectado sobre hardware y se ha guardado una referencia estable. El usuario ha confirmado que la detección de giro funciona correctamente.
 
-Para recalibrar, colocar el panel en la orientación de referencia deseada y enviar `ORIENT` seguido de salto de línea por USB. Después mantenerlo quieto. Los cambios aparecen en el monitor serie y `/health`. Se redibuja el último frame válido incluso sin nuevos POST; PNGs rechazados no alteran esa copia. La rotación y el brillo se aplican solo en la placa: no afectan al simulador.
+Para recalibrar, colocar el panel en la orientación de referencia deseada y enviar `ORIENT` seguido de salto de línea por USB. Después mantenerlo quieto. Los cambios aparecen en el monitor serie y `/health`. Se redibuja el contenido activo (PNG o reloj) incluso sin nuevos POST; PNGs rechazados no alteran la copia del último frame válido. La rotación y el brillo se aplican solo en la placa: no afectan al simulador.
 
 ## Panel y pinout
 
