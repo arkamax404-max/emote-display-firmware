@@ -1,10 +1,12 @@
 # Preparar la actualización integrada desde macOS
 
-**El candidato está congelado y comprobado sin conectar con la placa; todavía NO está listo para escribir.**
-Esta preparación combina reloj autónomo y contadores de emisores. No instala herramientas,
-no cambia credenciales y no autoriza abrir el puerto, pulsar BOOT/RESET, cargar un stub ni flashear.
-Es un procedimiento nuevo: requiere su propia revisión independiente de solo lectura;
-no reintenta ni traslada el verificador Windows que terminó sin dictamen.
+**El candidato está congelado; el preflight ROM de solo lectura está autorizado y pendiente de resultado. Todavía NO está listo para escribir.**
+Esta preparación combina reloj autónomo y contadores de emisores. El usuario autorizó abrir
+el puerto confirmado, entrar/resetear a ROM y leer; también aceptó la recuperación local sin
+cifrar con permisos privados. No instala herramientas, no cambia credenciales ni autoriza
+cargar un stub, flashear o restaurar. La revisión de solo lectura anterior cubrió la preparación
+del plan cifrado, no la ejecución actual ni un nuevo dictamen. No reintenta ni traslada el
+verificador Windows que terminó sin dictamen.
 
 ## 1. Qué está preparado
 
@@ -70,98 +72,53 @@ La cabecera no sustituye el algoritmo de boot del SDK/bootloader exacto.
 su integridad/estado y el fallback, correlacionada con la aplicación ejecutada.
 No inventar un decodificador ni asumir `ota_0`; si no puede probarse, no escribir.
 
-## 3. Recuperación macOS protegida — aún no disponible
+## 3. Recuperación macOS local sin cifrar — copia aún pendiente
 
 La copia histórica usa DPAPI ligada al perfil Windows: conservarla, pero **no cuenta como
 recuperación utilizable desde este Mac**. Véase la [guía anterior](continue-on-macos.md).
-No se ha creado imagen cifrada, montado volumen, pedido contraseña ni leído flash.
+El usuario aceptó que la nueva copia local sea **sin cifrar y pueda contener credenciales Wi-Fi**.
 
-### Preparación humana después de revisar y aprobar esta fase
+El directorio `.tools/firmware-upgrade/clock-sender-26f3a07/recovery-local` ya existe con
+permisos **0700**, solo para el usuario local. Está ignorado por Git y queda fuera de commits;
+los archivos de recuperación deben tener permisos **0600**. Ignorar la ruta no cifra su contenido:
+no publicar ni imprimir dumps, metadatos crudos o credenciales en terminal/chat. Dirigir allí
+las lecturas, comparaciones y temporales, con espacio suficiente para dos lecturas completas
+y sus comprobaciones según la capacidad flash viva. Todavía no hay una copia validada.
 
-Se comprobaron las ayudas locales de `hdiutil create`, `attach` e `imageinfo` y el manual:
-`-agentpass` fuerza el prompt de contraseña. **Sintaxis revisada, NO probada funcionalmente.**
-Los siguientes pasos los ejecuta el humano, uno por uno, en su propio Terminal privado;
-el agente no ejecuta creación/montaje ni recibe la contraseña. No usar grabación de sesión,
-compartir pantalla ni guardar la clave en el llavero: desmarcar cualquier opción de recordarla.
-Introducirla solo en el prompt privado; nunca en argumentos, variables, stdin automatizado,
-archivos, chat o registros. Si no aparece el prompt esperado, cancelar y detenerse.
+**Nota histórica:** la imagen cifrada existente y `recovery-mount` se conservan intactos.
+El flujo de cifrado fallido no se reintenta ni se diagnostica como requisito de esta recuperación;
+no crear, desbloquear, montar, reemplazar ni borrar la imagen para continuar.
 
-La propuesta es un sparsebundle APFS de **128 MiB**, no una copia de flash todavía.
-Antes de crearlo, comprobar espacio libre del Mac; después, espacio útil del volumen.
-Su capacidad debe cubrir dos lecturas completas, comprobaciones y margen de filesystem,
-según la capacidad flash viva que aún falta probar. Si no basta, detenerse y revisar el tamaño;
-no ampliar ni sustituir automáticamente una imagen existente.
+### Prueba de recuperación pendiente, dentro de las lecturas ya autorizadas
 
-**Paso A — rutas nuevas y creación, sin montaje implícito.** No ejecutar en paralelo con
-otros procesos que modifiquen estas rutas. Cualquier fallo exige parar, no borrar ni reusar
-lo encontrado. La comprobación física rechaza ancestros que redirijan fuera del staging.
+1. Capturar la flash completa de tamaño probado y una segunda lectura independiente, con
+   operaciones acotadas y sin arrancar la aplicación entre ellas. Comparar bytes, tamaños y
+   SHA-256 dentro de `recovery-local`; no volcar contenido ni secretos en terminal/chat.
+2. Releer los archivos y comprobar identidad y hashes, tabla/imagen antigua y cobertura del
+   intervalo recuperable. Registrar solo un resumen no sensible. Fallo de lectura, espacio
+   o comparación implica **HOLD**, no una copia válida.
 
-```sh
-cd /Users/santiagoperez/Development/emote-display-firmware/.tools/firmware-upgrade/clock-sender-26f3a07 || exit 1
-test "$(pwd -P)" = /Users/santiagoperez/Development/emote-display-firmware/.tools/firmware-upgrade/clock-sender-26f3a07 || exit 1
-umask 077
-test ! -e recovery.sparsebundle && test ! -L recovery.sparsebundle || exit 1
-test ! -e recovery-mount && test ! -L recovery-mount || exit 1
-mkdir -m 700 recovery-mount || exit 1
-hdiutil create -size 128m -type SPARSEBUNDLE -fs APFS -volname FirmwareRecovery -nospotlight -encryption AES-256 -agentpass recovery.sparsebundle || exit 1
-```
+Una copia válida requiere lecturas consistentes y recuperación utilizable, **no cifrado ni
+roundtrip de contraseña**. La mera legibilidad no garantiza restauración física: se requiere
+un plan oficial compatible con la seguridad y el rango reales, revisado, sin restauración de
+prueba destructiva. No hay dirección de restauración aprobada.
 
-**Paso B — inspeccionar antes de montar.** En ese mismo Terminal y directorio:
+## 4. Preflight vivo ya autorizado; próxima autorización solo para efectos adicionales
 
-```sh
-hdiutil imageinfo -plist -agentpass recovery.sparsebundle
-```
-
-Confirmar en la información de la imagen el cifrado **AES-256**; si falta, es ambiguo o
-hay error, **HOLD**. No interpretar el mero éxito de creación como prueba de cifrado.
-
-**Paso C — montaje explícito dentro del repositorio.** Rechazar enlaces simbólicos,
-rutas no vacías o ya montadas; revisar que el directorio sigue siendo el recién creado.
-No continuar si cambió el directorio de trabajo desde A.
-
-```sh
-test -d recovery-mount && test ! -L recovery-mount || exit 1
-test -z "$(ls -A recovery-mount)" || exit 1
-hdiutil attach -agentpass -mountpoint "$PWD/recovery-mount" recovery.sparsebundle
-```
-
-Comprobar en el resultado que el volumen desbloqueado corresponde a esta imagen y está
-montado exactamente en el `recovery-mount` local, no en `/Volumes` ni en otra ruta.
-**No crear ningún dump hasta confirmar cifrado, montaje real y espacio suficiente.**
-Si attach falla, el directorio vacío NO es almacenamiento protegido; no escribir en él.
-Dirigir todas las lecturas de flash, metadatos crudos, comparaciones y temporales al volumen,
-nunca a un archivo sin protección para cifrarlo después. Un volumen montado expone datos al
-usuario local: limitar acceso y desmontarlo al terminar. Ignorar una ruta en Git no la cifra.
-
-### Prueba de recuperación pendiente, con autorización de lectura separada
-
-1. Capturar la flash completa de tamaño probado y una segunda lectura independiente, sin
-   arrancar la aplicación entre ellas. Comparar bytes, tamaños y SHA-256 dentro del volumen;
-   no volcar contenido ni secretos en terminal/chat.
-2. Desmontar, volver a desbloquear con la contraseña y releer los archivos; comprobar de
-   nuevo identidad y hashes, tabla/imagen antigua y cobertura del intervalo recuperable.
-   Registrar solo un resumen no sensible fuera del volumen. Fallo de lectura, desbloqueo,
-   espacio o comparación implica **HOLD**, no una copia válida.
-
-Crear/montar la imagen no demuestra recuperación utilizable. Ni una copia legible ni el
-roundtrip garantizan por sí solos restauración física: se requiere un plan oficial compatible
-con la seguridad y el rango reales, revisado, sin restauración de prueba destructiva.
-No hay dirección de restauración aprobada.
-
-## 4. Próxima autorización: preflight vivo, sin escritura de flash
-
-Solicitar aprobación explícita para **abrir el puerto confirmado de esta placa**, identificarla,
-entrar/resetear a ROM y leer identidad ESP32-S3, flash y seguridad, tabla de particiones y otadata.
-Nombrar los resets previstos y sus efectos sobre la aplicación. Confirmar puerto vigente;
+El usuario ya autorizó **abrir el puerto confirmado de esta placa**, identificarla, entrar/resetear
+a ROM y leer identidad ESP32-S3, flash y seguridad, tabla de particiones y otadata. El intento
+actual de lectura ROM está pendiente de resultado; no se afirma éxito ni hace falta pedir otra
+vez esos permisos. Confirmar puerto vigente y respetar los resets autorizados y sus efectos;
 `/dev/cu.usbmodem14101` y USB `239A:8125` son solo la enumeración pasiva previa.
 
-La aprobación debe distinguir lectura de flash de ejecución en RAM: intentar ROM sin stub;
+La autorización distingue lectura de flash de ejecución en RAM: usar ROM sin stub;
 si la lectura requiere cargar/ejecutar el stub oficial, detenerse y obtener permiso específico
-antes de hacerlo. Las lecturas que creen archivos esperan al almacenamiento protegido validado.
-No publicar datos crudos de seguridad, NVS ni credenciales.
+antes de hacerlo. Las lecturas que creen archivos usan el directorio privado de la sección 3.
+No publicar datos crudos de seguridad, NVS ni credenciales. No hay autorización de flash ni
+restauración.
 
-Antes de redactar cualquier comando activo, fijar puerto, opciones de reset y si habrá stub,
-comprobar su ayuda y revisar los efectos. No hay aquí un script activo para copiar y pegar.
+Mantener fijados puerto y opciones de reset, comprobar la ayuda oficial y revisar los efectos.
+No hay aquí un script activo para copiar y pegar.
 
 **HOLD de escritura** mientras falte cualquiera de estos puntos:
 
@@ -169,7 +126,7 @@ comprobar su ayuda y revisar los efectos. No hay aquí un script activo para cop
   y compatibilidad de la imagen. Una restricción o resultado desconocido no se salta con `--force`.
 - Tabla viva validada, ubicación real de tabla/otadata y prueba oficial OTA/aplicación activa;
   no imponer los offsets históricos ni deducirlos del CSV local.
-- Copia actual protegida, doble lectura consistente, roundtrip y recuperación revisada utilizable en Mac.
+- Copia actual local privada sin cifrar, doble lectura consistente y recuperación revisada utilizable en Mac.
 - Rango exacto de aplicación y borrado contenido en su partición, preservación de **todo** lo ajeno,
   revisión independiente favorable de este procedimiento nuevo y aprobación posterior de escritura.
 
@@ -194,7 +151,7 @@ Antes de arrancar la aplicación, mantener ROM y usar lectura oficial independie
    no aceptar solo el mensaje de éxito de escritura o `verify_flash`.
 2. Comparar con el snapshot previo **todos los bytes fuera del intervalo sector-redondeado**,
    desde cero hasta la capacidad flash probada: incluye huecos, cola de aplicación,
-   otras aplicaciones y todos los datos, no solo tabla/NVS/otadata. Trabajar dentro del volumen cifrado.
+   otras aplicaciones y todos los datos, no solo tabla/NVS/otadata. Trabajar dentro de `recovery-local`.
 3. Ante cualquier diferencia inesperada, detenerse antes de arrancar: conservar pruebas protegidas,
    no reintentar, no restaurar automáticamente; solicitar diagnóstico y autorización delimitada.
 

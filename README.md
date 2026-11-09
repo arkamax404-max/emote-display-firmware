@@ -30,7 +30,7 @@ El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya
 
 ## Continuar el reloj desde el Mac
 
-La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. Para el candidato que integra reloj y contadores de emisores, seguir la [preparación de actualización en macOS](docs/macos-firmware-upgrade.md): binario congelado, herramientas oficiales y recuperación cifrada propuesta, todavía con bloqueos de preflight vivo y sin autorización de carga. El firmware del reloj aún no está instalado; no aplicar automáticamente el upload genérico de la sección siguiente a esta actualización.
+La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. Para el candidato que integra reloj y contadores de emisores, seguir la [preparación de actualización en macOS](docs/macos-firmware-upgrade.md): binario congelado, herramientas oficiales y recuperación local sin cifrar aceptada, ignorada por Git y con permisos privados (puede contener credenciales Wi-Fi). El preflight ROM de lectura y resets ya está autorizado, con resultado pendiente; la copia consistente y utilizable aún debe validarse. No hay autorización de stub, carga ni restauración. El firmware del reloj aún no está instalado; no aplicar automáticamente el upload genérico de la sección siguiente a esta actualización.
 
 ## Compilar y cargar
 
