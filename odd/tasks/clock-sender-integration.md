@@ -1,6 +1,6 @@
 # Clock and sender counter integration
 Objective: combine the existing autonomous clock and sender IP counters on macOS without device writes or publication.
-Branch: `feat/clock-sender-integration`; base: `3a54cfe`. Existing clock commits are reused, not rewritten. Forecast: <200 newly authored integration/test/doc lines; inherited history separate. Delivery: ask-on-risk.
+Branch: `feat/clock-sender-integration`; base: `3a54cfe`. Existing clock commits are reused, not rewritten. Forecast: <200 newly authored integration/test/doc lines; inherited history separate. Delivery: auto-chain; chain_strategy=feature-branch-chain (explicit human selection after integration commit).
 
 ## Specs
 - S1: "procede" accepts the preceding proposal: "El próximo paso recomendado es preparar una integración que conserve los contadores y verificarla en el Mac, todavía sin flashear."
@@ -8,9 +8,9 @@ Branch: `feat/clock-sender-integration`; base: `3a54cfe`. Existing clock commits
 - S3: Verify compilation and repository-local tests on macOS. Report failures, omissions and hardware checks as such, not as passed. The optional sender integration requiring `../gentle-emote` is not authorized in this session.
 
 ## Tasks
-- T1 | S1,S2 | parent branch/history integration; bounded worker at context backstop | done | Normal declaration conflict resolved retaining both sets of state; two helper coexistence tests added and passed. Risk: item 3 (shared display and request integration). Commit: pending.
-- T2 | S1-S3 | bounded worker self-check, parent seam and independent verifier | done | Worker, independent verifier and parent seam PASS: local suite 20 passed/1 explicit skip; target build SUCCESS (RAM 154688, flash 873605). Record exact skips. Commit: pending.
-- T3 | S1-S3 | parent assessment and local work-unit commit | in_progress | Assessment reviewDue=false; no native START due. Record evidence and save local integration merge. No publication. Commit: pending.
+- T1 | S1,S2 | parent branch/history integration; bounded worker at context backstop | done | Normal declaration conflict resolved retaining both sets of state; two helper coexistence tests added and passed. Risk: item 3 (shared display and request integration). Commit: `a7e4a56`.
+- T2 | S1-S3 | bounded worker self-check, parent seam and independent verifier | done | Worker, independent verifier and parent seam PASS: local suite 20 passed/1 explicit skip; target build SUCCESS (RAM 154688, flash 873605). Evidence commit: `a7e4a56`.
+- T3 | S1-S3 | parent assessment and local work-unit commit | done | Integration merge `a7e4a56` saved locally; committed-only assessment reviewDue=false/under_budget. No native START due and no publication. Closing metadata saved separately.
 
 ## Log
 - L1: Original user request: "haz pull y revisa una documentacion que hemos subido hace unos minutos para un upgrade del firmware".
@@ -21,3 +21,5 @@ Branch: `feat/clock-sender-integration`; base: `3a54cfe`. Existing clock commits
 - L6: Native ASSESS: nativeRisk medium, escalation3 high, independentVerifier=true, reviewDue=false/under_budget; no native START due. Verifier mw9qzssc-3-c12v PASS S1-S3 authorized host scope: isolated focused2/2 and full21 total20pass1skip, additional scratch-only structural probes3/3; baseline sender_stats/wifi_info outputs identical across base/candidate. Source and binary identities unchanged. Existing compile evidence reviewed, not independently rebuilt. Physical/NTP and real sibling PNG remain unverified. Scratch structural probes are verification aids, not a production-test requirement; not copied into repository. Parent final suite/build started as job2.
 - L7: Commit scope is one local integration merge preserving the already-separated imported environment/clock/docs commits; do not squash/re-author those existing histories. Cached diff611 includes inherited content; newly authored integration/tests/tracking remain under200 lines. No PR/publishing strategy requested or authorized.
 - L8: Parent job2 exited0: suite21 tests in12.294s,20passed1explicit sibling skip; target cached build SUCCESS in3.63s RAM154688/flash873605, bin SHA256 unchanged, cached diff whitespace check0. Functional hardware/NTP and sibling integration not performed by scope. Host integration objective verified; device preflight remains a separate authorization and proof boundary.
+- L9: Parent saved merge a7e4a5687483812b768c4bb40723eed18c2e18f2, parents3a54cfe and9270d68. Committed-only ASSESS against3a54cfe: native medium/escalation3 high, reviewDue=false/under_budget; existing independent proof covers identical code. Working tree clean immediately after merge commit.
+- L10: Accumulated history relative to main measured831 authored lines/6 commits. User explicitly selected "Cadena sobre rama de integración — recomendado". Strategy feature-branch-chain applies to any future delivery, not permission to publish. Planned review slices: existing counter unit3a54cfe; imported Windows fixture unit2a423de; clock implementation68852a7; passive existing docs d45f1db/9270d68; integration delta a7e4a56 plus closing evidence. Preserve existing commits; future PR topology is preparatory only, no PRs or remote branches created. Local feature-branch integration is complete; hardware preflight and sibling fixture access remain outside this authorization.
