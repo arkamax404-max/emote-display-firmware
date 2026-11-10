@@ -15,23 +15,27 @@ Receptor de PNG para **Adafruit MatrixPortal ESP32-S3 + HUB75 de 64×64**, compa
 
 Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen superior de **3 px** y profundidad de color de **6 bits/canal** en Protomatter. `/health` confirma los tres valores, acelerómetro activo, referencia conservada y recepción de frames tras reiniciar. El usuario observó temblor/parpadeo tras esta actualización. Se ha cargado y verificado la vuelta a **4 bits/canal**, conservando brillo 25% y margen 3 px, para aislar la profundidad de color como posible causa. `/health` confirma `bitDepth: 4`, `brightness: 64`, `topOffset: 3`, acelerómetro activo y recepción de frames; pendiente de confirmación visual de estabilidad.
 
-## Reloj autónomo (actualización local, aún no cargada)
+## Reloj autónomo (v1.0.0 grabado; validación física pendiente)
+
+**Grabación verificada:** el firmware `v1.0.0` quedó en OTA0 mediante una única carga TinyUF2 autorizada. La copia del Mac devolvió un error de E/S; no se reenvió. Dos lecturas posteriores de `CURRENT.UF2`, su decodificación oficial y una revisión independiente confirmaron los 2 MiB completos: imagen nueva exacta más la cola anterior preservada. El error de copia permanece registrado; esta comprobación no demuestra la conservación de toda la flash ni el funcionamiento físico del reloj.
 
 El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
 
 - Al arrancar, conserva los diagnósticos hasta disponer de una hora válida. Sin un PNG previo, muestra entonces el reloj.
-- La pantalla de espera `READY / SEND PNG` añade **v1.0.0** debajo de `SEND PNG`. La versión solo aparece en esa pantalla, no en los otros diagnósticos, el reloj, los PNG ni la información Wi-Fi. Conserva el brillo, el margen y la rotación actuales. Es un cambio local aún no cargado ni verificado físicamente.
+- La pantalla de espera `READY / SEND PNG` añade **v1.0.0** debajo de `SEND PNG`. La versión solo aparece en esa pantalla, no en los otros diagnósticos, el reloj, los PNG ni la información Wi-Fi. Conserva el brillo, el margen y la rotación actuales; la visibilidad física de esa versión sigue pendiente.
 - Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
 - Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
 - Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
 - Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando, con refresco nominal de 1 Hz. Se conservan brillo, rotación y margen superior; los pies y el camino caben en las 61 filas lógicas visibles, sin otro framebuffer.
 - La pantalla informativa de Wi-Fi tiene prioridad. Al cerrarla muestra el PNG todavía vigente o el reloj, según corresponda.
 
-**La implementación y sus pruebas locales no equivalen a una validación física.** Esta actualización aún no se ha cargado: quedan por comprobar NTP real, visibilidad y estabilidad en la placa. Entrar en bootloader o subir firmware es un paso separado.
+**La grabación y las pruebas locales no equivalen a una validación física.** Tras la lectura de comprobación, la placa permanece en TinyUF2: falta arrancar la aplicación y comprobar la versión visible, Wi-Fi/NTP real, recepción PNG, retorno al reloj tras 10 segundos sin PNG válido y estabilidad. Pulsar RESET una sola vez permite intentar el arranque normal; el resultado aún no está confirmado.
 
 ## Continuar el reloj desde el Mac
 
-La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. Para el candidato que integra reloj y contadores de emisores, seguir la [preparación de actualización en macOS](docs/macos-firmware-upgrade.md): binario congelado, herramientas oficiales y recuperación local sin cifrar aceptada, ignorada por Git y con permisos privados (puede contener credenciales Wi-Fi). El preflight ROM de lectura y resets ya está autorizado, con resultado pendiente; la copia consistente y utilizable aún debe validarse. No hay autorización de stub, carga ni restauración. El firmware del reloj aún no está instalado; no aplicar automáticamente el upload genérico de la sección siguiente a esta actualización.
+El [registro de actualización v1.0.0](odd/tasks/versioned-clock-upload.md) contiene la autorización exacta, las comprobaciones y la validación física pendiente. Los binarios y las copias de recuperación están en `.tools/firmware-upgrade/`, ignorados por Git y con permisos privados; la copia completa de flash puede contener credenciales Wi-Fi. Se conservaron la imagen anterior y las evidencias del error de copia.
+
+La [guía de continuación en macOS](docs/continue-on-macos.md) y la [preparación ROM anterior](docs/macos-firmware-upgrade.md) documentan el candidato previo y sus bloqueos: no describen una carga ROM aprobada. La autorización TinyUF2 cubrió una sola copia de un archivo concreto, no cargas futuras ni restauraciones. **No ejecutar automáticamente el upload genérico siguiente para repetir esta actualización.**
 
 ## Compilar y cargar
 

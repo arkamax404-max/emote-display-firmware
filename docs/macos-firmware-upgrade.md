@@ -1,5 +1,7 @@
 # Preparar la actualización integrada desde macOS
 
+> **Estado posterior:** esta guía conserva el plan ROM del candidato anterior y sus bloqueos; no autoriza ejecutarlo. El firmware `v1.0.0` se grabó después por una ruta TinyUF2 distinta, con aprobación exacta y una única copia. El host devolvió E/S, pero el readback posterior de OTA0 coincidió íntegramente con la imagen aprobada y la cola preservada, corroborado independientemente. No hubo reenvío. La validación física sigue pendiente; consultar el [registro actual](../odd/tasks/versioned-clock-upload.md). Las autorizaciones no se extienden a nuevas cargas ni restauraciones.
+
 **El candidato está congelado; el preflight ROM de solo lectura está autorizado y pendiente de resultado. Todavía NO está listo para escribir.**
 Esta preparación combina reloj autónomo y contadores de emisores. El usuario autorizó abrir
 el puerto confirmado, entrar/resetear a ROM y leer; también aceptó la recuperación local sin
