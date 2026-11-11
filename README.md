@@ -23,7 +23,7 @@ El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya
 - Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
 - Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
 - Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
-- Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando, con refresco nominal de 1 Hz. Se conservan brillo, rotación y margen superior; los pies y el camino caben en las 61 filas lógicas visibles, sin otro framebuffer.
+- Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando, con refresco nominal de 1 Hz. Se conservan brillo y rotación; el reloj se dibuja sin desplazamiento vertical sobre las 64 filas completas (camino en la fila 63 y pies en las filas 55–62), sin otro framebuffer.
 - La pantalla informativa de Wi-Fi tiene prioridad. Al cerrarla muestra el PNG todavía vigente o el reloj, según corresponda.
 
 **La implementación y sus pruebas locales no equivalen a una validación física.** Esta actualización aún no se ha cargado: quedan por comprobar NTP real, visibilidad y estabilidad en la placa. Entrar en bootloader o subir firmware es un paso separado.
@@ -125,7 +125,7 @@ Recargar gentle-emote con `/reload` **después de configurar el Wi-Fi** y probar
 ## API y límites
 
 - `GET /health` → JSON con `ok`, `width`, `height`, contador `frames`, `brightness` (0–255), `topOffset` (px), `bitDepth`, `wifiInfo` (pantalla informativa visible), `accelerometer` (detectado), `rotation` (0/90/180/270) y `orientationCalibrated`.
-- `POST /emote`: `Content-Type: image/png`, `X-Emote-Version: 1`, `Content-Length` obligatorio.
+- `POST /emote`: `Content-Type: image/png`, `X-Emote-Version: 1`, `Content-Length` obligatorio. La cabecera opcional `X-Emote-State: clock` marca un frame de reloj del emisor; su ausencia o cualquier otro valor mantienen el avatar.
 - PNG **64×64, RGBA de 8 bits, sin entrelazado**, chunks IHDR/IDAT/IEND (formato exacto producido por gentle-emote). No admite PNG arbitrarios con paleta, RGB, metadatos o chunks auxiliares.
 - Máximo **32 KiB** de cuerpo, **4 KiB** de cabeceras y **2,5 s** totales por petición. No admite `Transfer-Encoding`, `Expect`, keep-alive ni pipelining. Conexión cerrada tras responder.
 - Responde 200 tras decodificar y presentar el frame; errores 4xx conservan la imagen anterior. Verifica CRC de chunks, dimensiones y decodificación completa a un buffer temporal antes de presentar.
@@ -135,7 +135,7 @@ Recargar gentle-emote con `/reload` **después de configurar el Wi-Fi** y probar
 
 ## Margen y colores
 
-El firmware desplaza todo el contenido **3 px hacia abajo** en coordenadas lógicas, también al girar. Las filas superiores 0–2 quedan negras. Descarta las tres últimas filas del PNG, que en el emisor actual solo contienen el color de fondo: el status queda en 47–51 y phase en 57–61, ambos dentro de los 64 px. Un PNG arbitrario con contenido en las últimas tres filas sí se recortará. El simulador y el PNG enviado no cambian.
+El firmware desplaza **3 px hacia abajo** las coordenadas lógicas del avatar, también al girar: las filas superiores 0–2 quedan negras y se descartan las tres últimas filas del PNG, que en el emisor actual solo contienen el color de fondo (status en 47–51 y phase en 57–61, dentro de los 64 px). Un PNG arbitrario con contenido en las últimas tres filas sí se recortará. Un frame enviado con `X-Emote-State: clock` se dibuja sin desplazamiento y usando las 64 filas; esa clasificación se guarda con el último frame válido y un PNG rechazado no la altera. Los relojes, autónomo y recibido, no sufren desplazamiento. El simulador y el PNG enviado no cambian.
 
 Se mantiene la paleta original y el orden RGB. Se probó subir Protomatter de 4 a 6 bits/canal para reducir cuantización, pero el usuario observó temblor/parpadeo. La corrección preparada vuelve a 4 bits/canal para priorizar el refresco estable; la fuente sigue siendo RGB565 (5/6/5 bits). El escalado de brillo redondea en lugar de truncar para conservar mejor los tonos oscuros. La profundidad adicional puede afectar refresco y RAM de ejecución: comprobar estabilidad y colores en la placa. No se ha aplicado gamma ni balance RGB sin una referencia visual del panel.
 

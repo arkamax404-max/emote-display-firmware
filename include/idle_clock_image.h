@@ -31,17 +31,18 @@ void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixe
 
 template<class Pixel>
 void draw(const std::tm &calendar, uint64_t epochSeconds, Pixel pixel) {
+  // Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
   auto plot = [&](int x, int y, uint16_t color) {
-    if (x >= 0 && x < 64 && y >= 0 && y < 61) pixel(x, y, color);
+    if (x >= 0 && x < 64 && y >= 0 && y < 64) pixel(x, y, color);
   };
-  for (int y = 0; y < 61; ++y) for (int x = 0; x < 64; ++x) plot(x, y, 0);
+  for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) plot(x, y, 0);
   const Labels value = labels(calendar);
   text(value.date, 12, 1, 1, MUTED, plot);
   text(value.hours, 12, 9, 4, WHITE, plot);
   text(value.minutes, 12, 31, 4, BLUE, plot);
   text(":", 43, 35, 1, AMBER, plot);
   text(value.seconds, 46, 33, 2, AMBER, plot);
-  for (int x = 0; x < 64; ++x) plot(x, 60, x % 8 < 3 ? GREEN : PATH);
+  for (int x = 0; x < 64; ++x) plot(x, 63, x % 8 < 3 ? GREEN : PATH);
   const bool odd = epochSeconds % 2;
   const char *rows[] = {" GGG ", "GGSS ", "  SS ", " BBB ", " BBB ", "  B  ",
                         odd ? " W W " : "  WW ", odd ? "W   W" : " W W "};
@@ -51,7 +52,7 @@ void draw(const std::tm &calendar, uint64_t epochSeconds, Pixel pixel) {
       const char part = rows[y][x];
       if (part == ' ') continue;
       const uint16_t color = part == 'G' ? GREEN : part == 'S' ? SKIN : part == 'B' ? BLUE : WHITE;
-      plot(left + x + 1, 52 + y, color);
+      plot(left + x + 1, 55 + y, color);
     }
   }
 }

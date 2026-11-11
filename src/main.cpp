@@ -22,6 +22,9 @@ static Orientation orientation;
 static bool accelerometerReady = false;
 static uint16_t lastFrame[64 * 64];
 static bool hasFrame = false;
+// Classification of lastFrame, updated only with a successful decode so an
+// invalid PNG never changes what is redrawn.
+static bool frameIsClock = false;
 static const char *messageFirst = "", *messageSecond = "";
 static WiFiServer server(80);
 static WiFiClient client;
@@ -68,8 +71,9 @@ static void renderDisplay() {
     return;
   }
   if (source == idle_clock::Source::Clock) {
+    // The renderer owns the full 64-row canvas; no vertical offset here.
     idle_clock::draw(calendar, uint64_t(epoch), [](int x, int y, uint16_t color) {
-      matrix.drawPixel(x, y + panel::TOP_OFFSET, panel::color(color));
+      matrix.drawPixel(x, y, panel::color(color));
     });
     matrix.show();
     return;
@@ -85,10 +89,13 @@ static void renderDisplay() {
     matrix.show();
     return;
   }
-  // Shift the logical image down; the sender's last three rows are black.
+  // Avatar frames keep the 3 px top margin and drop the sender's three
+  // bottom background rows; sender clock frames use all 64 rows at y0.
   // Apply after setRotation so the margin always follows the displayed top.
-  for (int y = 0; y < panel::VISIBLE_SOURCE_ROWS; ++y) for (int x = 0; x < 64; ++x) {
-    matrix.drawPixel(x, y + panel::TOP_OFFSET, panel::color(lastFrame[y * 64 + x]));
+  const int rows = frameIsClock ? panel::SIZE : panel::VISIBLE_SOURCE_ROWS;
+  const int offset = frameIsClock ? 0 : panel::TOP_OFFSET;
+  for (int y = 0; y < rows; ++y) for (int x = 0; x < 64; ++x) {
+    matrix.drawPixel(x, y + offset, panel::color(lastFrame[y * 64 + x]));
   }
   matrix.show();
 }
@@ -112,8 +119,10 @@ static bool showPng() {
   const bool decoded = frameDecoder.decode(pngBytes, received);
   clockState.pngResult(decoded, millis());
   if (!decoded) return false;
-  // Separate from decode staging so invalid PNGs cannot corrupt later redraws.
+  // Separate from decode staging so invalid PNGs cannot corrupt later redraws
+  // or alter the persisted frame classification.
   memcpy(lastFrame, frameDecoder.pixels(), sizeof(lastFrame));
+  frameIsClock = request.clockState;
   hasFrame = true;
   renderDisplay();
   ++accepted;

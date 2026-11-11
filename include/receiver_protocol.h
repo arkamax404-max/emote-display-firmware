@@ -7,7 +7,7 @@
 namespace receiver {
 constexpr size_t MAX_HEADERS = 4096;
 constexpr size_t MAX_PNG = 32768;
-struct Request { size_t length = 0; bool health = false; };
+struct Request { size_t length = 0; bool health = false; bool clockState = false; };
 
 inline std::string trim(std::string value) {
   const auto first = value.find_first_not_of(" \t");
@@ -51,6 +51,10 @@ inline int parseHeaders(const std::string &headers, Request &request) {
     } else if (key == "x-emote-version") {
       if (hasVersion || value != "1") return 400;
       hasVersion = true;
+    } else if (key == "x-emote-state") {
+      // Sender metadata for the clock skin. Missing or unknown values keep
+      // the default avatar rendering; no value is rejected here.
+      request.clockState = lower(value) == "clock";
     }
     start = end + 2;
   }

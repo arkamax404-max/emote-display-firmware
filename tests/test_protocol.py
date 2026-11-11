@@ -35,6 +35,11 @@ class ProtocolTests(unittest.TestCase):
     def parse(self, body, mode="headers"):
         return int(subprocess.run([str(self.binary), mode], input=body, capture_output=True, check=True).stdout)
 
+    def parse_state(self, body):
+        output = subprocess.run([str(self.binary), "state"], input=body, capture_output=True, check=True).stdout.decode()
+        status, state = output.split()
+        return int(status), state
+
     def headers(self, extra=b"", length=b"100"):
         return (b"POST /emote HTTP/1.1\r\nContent-Type: image/png\r\nX-Emote-Version: 1\r\n"
                 + b"Content-Length: " + length + b"\r\n" + extra + b"\r\n")
@@ -64,6 +69,19 @@ class ProtocolTests(unittest.TestCase):
         ]:
             with self.subTest(raw=raw[:100]):
                 self.assertEqual(self.parse(raw), expected)
+
+    def test_emote_state_clock_metadata(self):
+        self.assertEqual(self.parse_state(self.headers(b"X-Emote-State: clock\r\n")), (200, "clock"))
+        # The clock metadata must never be rejected by the existing parser.
+        self.assertEqual(self.parse(self.headers(b"X-Emote-State: clock\r\n")), 200)
+
+    def test_missing_or_unknown_state_defaults_avatar(self):
+        self.assertEqual(self.parse_state(self.headers()), (200, "avatar"))
+        for value in [b"avatar", b"image", b"photo", b""]:
+            with self.subTest(value=value):
+                self.assertEqual(self.parse_state(self.headers(b"X-Emote-State: " + value + b"\r\n")),
+                                 (200, "avatar"))
+                self.assertEqual(self.parse(self.headers(b"X-Emote-State: " + value + b"\r\n")), 200)
 
     def test_sender_png(self):
         self.assertEqual(self.parse(png(), "png"), 200)

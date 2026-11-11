@@ -77,11 +77,11 @@ int main(int argc, char **argv) {
     CHECK(std::string(labels.hours) == "13" && std::string(labels.minutes) == "07");
     CHECK(std::string(labels.seconds) == "09");
   } else if (test == "pixels") {
-    std::array<uint16_t, 64 * 61> image;
+    std::array<uint16_t, 64 * 64> image;
     image.fill(0xffff);
     bool bounds = true;
     auto pixel = [&](int x, int y, uint16_t color) {
-      if (x < 0 || x >= 64 || y < 0 || y >= 61) bounds = false;
+      if (x < 0 || x >= 64 || y < 0 || y >= 64) bounds = false;
       else image[y * 64 + x] = color;
     };
     std::tm calendar = {};
@@ -93,15 +93,15 @@ int main(int argc, char **argv) {
     CHECK(image[31 * 64 + 12] == idle_clock::BLUE); // 3, scale 4.
     CHECK(image[33 * 64 + 46] == idle_clock::AMBER); // 5, scale 2.
     CHECK(image[1 * 64 + 12] == idle_clock::MUTED); // Date 0.
-    CHECK(image[52 * 64 + 2] == idle_clock::GREEN);
-    CHECK(image[52 * 64 + 42] == idle_clock::GREEN);
-    CHECK(image[59 * 64 + 2] == idle_clock::WHITE);
-    CHECK(image[60 * 64 + 0] == idle_clock::GREEN);
-    CHECK(image[60 * 64 + 4] == idle_clock::PATH);
+    CHECK(image[55 * 64 + 2] == idle_clock::GREEN);
+    CHECK(image[55 * 64 + 42] == idle_clock::GREEN);
+    CHECK(image[62 * 64 + 2] == idle_clock::WHITE);
+    CHECK(image[63 * 64 + 0] == idle_clock::GREEN);
+    CHECK(image[63 * 64 + 4] == idle_clock::PATH);
     idle_clock::draw(calendar, 5, pixel);
-    CHECK(bounds && image[59 * 64 + 3] == idle_clock::WHITE);
-    CHECK(image[59 * 64 + 7] == idle_clock::WHITE);
-    CHECK(image[59 * 64 + 2] == 0); // Previous feet were cleared.
+    CHECK(bounds && image[62 * 64 + 3] == idle_clock::WHITE);
+    CHECK(image[62 * 64 + 7] == idle_clock::WHITE);
+    CHECK(image[62 * 64 + 2] == 0); // Previous feet were cleared.
     for (uint64_t step = 0; step < 80; ++step) idle_clock::draw(calendar, step, pixel);
     CHECK(bounds); // Both walkers clip safely at both edges in both gaits.
   } else return 2;
