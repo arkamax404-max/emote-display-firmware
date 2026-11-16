@@ -14,7 +14,7 @@ int main() {
   assert(overlay.update(false, 5055));
   assert(overlay.visible() && overlay.page() == 1);
   assert(overlay.update(false, 10055));
-  assert(overlay.page() == 0);
+  assert(overlay.page() == 2);
   assert(overlay.update(false, 15055));
   assert(!overlay.visible());
 
@@ -31,6 +31,42 @@ int main() {
   assert(wrapped.visible());
   assert(wrapped.update(false, 15020));
   assert(!wrapped.visible());
+
+  WifiInfoOverlay senders;
+  senders.update(true, 0, 8);
+  senders.update(true, 35, 8);
+  for (uint8_t page = 0; page < 10; ++page) {
+    senders.update(false, 35 + page * 5000, 8);
+    assert(senders.visible() && senders.page() == page);
+  }
+  senders.update(false, 50035, 8);
+  assert(!senders.visible());
+
+  // New senders extend the bounded schedule without restarting earlier pages.
+  WifiInfoOverlay growing;
+  growing.update(true, 0);
+  growing.update(true, 35);
+  growing.update(false, 10035, 2);
+  assert(growing.page() == 2);
+  growing.update(false, 15035, 2);
+  assert(growing.visible() && growing.page() == 3);
+  growing.update(false, 20035, 2);
+  assert(!growing.visible());
+
+  SenderStats stats;
+  const auto empty = wifiInfoLines(2, true, "x", "1.2.3.4", -1, &stats);
+  assert(empty[0] == "SENDERS" && empty[2] == "NONE YET" && empty[6] == "UP: CLOSE");
+  stats.record(0xffffffff);
+  auto sender = wifiInfoLines(2, true, "x", "1.2.3.4", -1, &stats);
+  assert(sender[0] == "SENDER 1/1" && sender[1] + sender[2] == "255.255.255.255");
+  assert(sender[3] == "REQUESTS" && sender[4] == "1" && sender[5].empty());
+  for (uint32_t i = 0; i < 8; ++i) stats.record(i);
+  sender = wifiInfoLines(9, false, "", "", 0, &stats);
+  assert(sender[0] == "SENDER 8/8" && sender[1] + sender[2] == "0.0.0.6");
+  assert(sender[5] == "MORE IPS!" && sender[6] == "UP: CLOSE");
+  assert(wifiInfoAscii(std::to_string(UINT32_MAX)).size() == 10);
+  for (const auto &lines : {empty, sender})
+    for (const auto &line : lines) assert(line.size() <= 10);
 
   const auto ip = wifiInfoLines(0, true, "test-network", "192.168.1.227", -65);
   assert(ip[2] + ip[3] == "192.168.1.227");

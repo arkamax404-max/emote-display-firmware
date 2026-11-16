@@ -15,11 +15,14 @@ Receptor de PNG para **Adafruit MatrixPortal ESP32-S3 + HUB75 de 64×64**, compa
 
 Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen superior de **3 px** y profundidad de color de **6 bits/canal** en Protomatter. `/health` confirma los tres valores, acelerómetro activo, referencia conservada y recepción de frames tras reiniciar. El usuario observó temblor/parpadeo tras esta actualización. Se ha cargado y verificado la vuelta a **4 bits/canal**, conservando brillo 25% y margen 3 px, para aislar la profundidad de color como posible causa. `/health` confirma `bitDepth: 4`, `brightness: 64`, `topOffset: 3`, acelerómetro activo y recepción de frames; pendiente de confirmación visual de estabilidad.
 
-## Reloj autónomo
+## Reloj autónomo (v1.0.0 grabado; validación física pendiente)
+
+**Grabación verificada:** el firmware `v1.0.0` quedó en OTA0 mediante una única carga TinyUF2 autorizada. La copia del Mac devolvió un error de E/S; no se reenvió. Dos lecturas posteriores de `CURRENT.UF2`, su decodificación oficial y una revisión independiente confirmaron los 2 MiB completos: imagen nueva exacta más la cola anterior preservada. El error de copia permanece registrado; esta comprobación no demuestra la conservación de toda la flash ni el funcionamiento físico del reloj.
 
 El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
 
 - Al arrancar, conserva los diagnósticos hasta disponer de una hora válida. Sin un PNG previo, muestra entonces el reloj.
+- La pantalla de espera `READY / SEND PNG` añade **v1.0.0** debajo de `SEND PNG`. La versión solo aparece en esa pantalla, no en los otros diagnósticos, el reloj, los PNG ni la información Wi-Fi. Conserva el brillo, el margen y la rotación actuales; la visibilidad física de esa versión sigue pendiente.
 - Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
 - Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
 - Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
@@ -28,9 +31,15 @@ El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya
 
 **Estado de aceptación:** el usuario ha confirmado que la animación ha mejorado y ha dado por buenos los cambios para integrarlos en `main`. El firmware se ha compilado y su UF2 se ha validado frente al binario generado. Esta aceptación visual no equivale a comprobar todos los escenarios de NTP, cambio de horario o pérdida de red; las pruebas locales tampoco sustituyen esas comprobaciones físicas. La hoja `lemmings_reference.png` es una referencia local no distribuida en el repositorio.
 
+**La grabación y las pruebas locales no equivalen a una validación física.** Tras la lectura de comprobación, la placa permanece en TinyUF2: falta arrancar la aplicación y comprobar la versión visible, Wi-Fi/NTP real, recepción PNG, retorno al reloj tras 10 segundos sin PNG válido y estabilidad. Pulsar RESET una sola vez permite intentar el arranque normal; el resultado aún no está confirmado.
+
 ## Continuar el reloj desde el Mac
 
-La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. La guía conserva la evidencia y los pendientes de aquella sesión; para el estado actual de aceptación, consultar la sección anterior. No aplicar automáticamente el upload genérico de la sección siguiente.
+El [registro de actualización v1.0.0](odd/tasks/versioned-clock-upload.md) contiene la autorización exacta, las comprobaciones y la validación física pendiente. Los binarios y las copias de recuperación están en `.tools/firmware-upgrade/`, ignorados por Git y con permisos privados; la copia completa de flash puede contener credenciales Wi-Fi. Se conservaron la imagen anterior y las evidencias del error de copia.
+
+La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. La guía conserva la evidencia y los pendientes de aquella sesión; para el estado actual de aceptación, consultar la sección anterior.
+
+La [preparación ROM anterior](docs/macos-firmware-upgrade.md) documenta el candidato previo y sus bloqueos: no describe una carga ROM aprobada. La autorización TinyUF2 cubrió una sola copia de un archivo concreto, no cargas futuras ni restauraciones. **No ejecutar automáticamente el upload genérico siguiente para repetir esta actualización.**
 
 ## Compilar y cargar
 
@@ -143,12 +152,17 @@ Se mantiene la paleta original y el orden RGB. Se probó subir Protomatter de 4 
 
 El emisor local tiene ahora `externalDisplay.outline: "#808080"`: contorno externo blanco apagado de 1 px; se conserva la paleta del sprite sobre la silueta, sin afectar a las etiquetas ni al firmware. Aplicar con `/reload`. En sprites opacos se infiere la silueta usando negro puro como fondo; en sprites con transparencia se usa alfa. Los huecos internos cerrados no se contornean. El borde puede recortarse si la figura toca la primera fila del PNG.
 
-## Botón UP: información Wi-Fi
+## Botón UP: información Wi-Fi y emisores
 
-Actualización cargada y flash verificada. `/health` confirma `wifiInfo: false` y recepción de nuevos frames tras arrancar; funcionamiento del botón y pantalla Wi-Fi confirmado por el usuario. El botón **UP (GPIO6, activo bajo)** muestra información durante **15 segundos**, alternando cada 5 segundos:
+El botón **UP (GPIO6, activo bajo)** muestra estas páginas en orden, **5 segundos por página**:
 
 - Estado de conexión, **IP asignada** y señal RSSI. La IP se reparte en dos líneas para que quepa completa: `192.168.` + `1.227` = `192.168.1.227`.
 - SSID completo (hasta 32 bytes) y estado. Caracteres no soportados por la fuente ASCII se muestran como `?`.
+- Emisores: una página por IP de origen, con IP completa en dos líneas y contador `REQUESTS`. Si aún no hay emisores indica `SENDERS / NONE YET`. La duración total es de **15 a 50 segundos**, según los emisores registrados; si aparece uno nuevo durante la consulta se amplía hasta incluirlo.
+
+Se conservan las **primeras 8 IPv4 distintas** en RAM, en orden de llegada, sin expulsar ninguna. `MORE IPS!` indica que hubo intentos de otras IP que no se almacenaron. Cada contador se satura en **4294967295**, sin volver a cero. Los datos se borran al reiniciar; no se guardan en NVS. La IP procede exclusivamente de la conexión TCP, no de cabeceras enviadas por el cliente.
+
+Se cuenta **una vez por conexión**, en cuanto llega la primera línea completa y exacta `POST /emote HTTP/1.0\r\n` o `POST /emote HTTP/1.1\r\n` (los caracteres `\r\n` representan CRLF). Cuenta todos esos intentos, aunque después fallen las cabeceras —incluidos caracteres inválidos—, el PNG, el cuerpo incompleto o el timeout. Una línea inicial incompleta, no identificable o no soportada no cuenta. Tampoco cuentan `/health`, otras rutas ni otros métodos. El contador `frames` de `/health` sigue contando solo imágenes aceptadas. Firmware cargado por USB con hash de escritura verificado; funcionamiento de la nueva sección de emisores confirmado visualmente por el usuario sobre la placa.
 
 Otra pulsación de UP cierra la pantalla antes del timeout. Al terminar vuelve al **último frame recibido** si sigue vigente; si han pasado 10 segundos y hay hora válida, muestra el reloj. Los POST, el contador y la autorrotación siguen activos mientras se muestra la información. No muestra ni registra la contraseña. Si no hay conexión indica `NO WIFI / NO IP`. El botón DOWN queda libre y BOOT/RESET no se modifican. `/health` añade `wifiInfo` para indicar si la pantalla informativa está visible.
 
