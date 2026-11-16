@@ -7,8 +7,39 @@ constexpr uint16_t rgb(unsigned r, unsigned g, unsigned b) {
 }
 constexpr uint16_t WHITE = rgb(242,241,220), MUTED = rgb(147,181,160);
 constexpr uint16_t BLUE = rgb(85,189,232), GREEN = rgb(184,243,91);
-constexpr uint16_t SKIN = rgb(244,195,140), AMBER = rgb(241,189,101);
+constexpr uint16_t SKIN = rgb(240,208,208), AMBER = rgb(241,189,101);
 constexpr uint16_t PATH = rgb(41,75,54);
+// Sprite palette, distinct from the clock text/path colors above, sampled
+// from pure interior blocks of lemmings_reference.png: saturated green hair,
+// royal-blue overalls and pale pink skin (the old SKIN tint was provisional).
+constexpr uint16_t HAIR = rgb(0,179,0), OUTFIT = rgb(64,64,224);
+
+// Nine lemming walking poses (8x10 px, all facing right), extracted from the
+// reference sheet lemmings_reference.png (362x545 RGBA, 15 px per logical
+// pixel, grid origin (2,3), cell-center voting): green mop hair ('H'), pale
+// pink face/arms/hands/feet ('S'), royal-blue overalls ('O'). Transparent
+// '.' background; dark sheet background removed; poses progress row-major
+// like the sheet frames 1..9. Sprite rows sit on 53..62, above path row 63.
+constexpr char FRAMES[9][10][9] = {
+  {"........", "..HHHH..", "..HHS...", "...SSS..", "...SO...",
+   "...SO...", "...SO...", "...OO...", "..SOO...", "...SS..."},
+  {"...H.H..", "..HHH...", "..HHS...", "...SSS..", "...SO...",
+   "..SOO...", "..SOO.S.", "...OO.S.", "..OO.S..", "..SS...."},
+  {"........", "..H.H...", "..HHH...", "...HS...", "...SSS..",
+   "..SSO...", "..SOO...", ".SSOOO..", "..OOOO..", ".SS..SS."},
+  {"........", "...HH...", "..HHSH..", "..HSSS..", "...SO...",
+   "...SO...", "..SOO...", "...OO...", ".SOOOO..", ".S..SS.."},
+  {"........", "..HHHH..", "..HHS...", "..HSSS..", "...SO...",
+   "...OS...", "...SO...", "...OO...", "..SOO...", "...SS..."},
+  {"...H.H..", "..HHH...", "..HHS...", "...SSS..", "...SO...",
+   "...OS...", "...OS.S.", "...OO.S.", "..OO.S..", "..SS...."},
+  {"........", "..H.H...", "..HHH...", "...HS...", "...SSS..",
+   "...OS...", "...OS...", "...OOS..", "..OOOO..", ".SS..SS."},
+  {"........", "...HH...", "..HHSH..", "..HSSS..", "...SO...",
+   "...SO...", "...OS...", "...OO...", ".SOOOO..", ".S..SS.."},
+  {"..HH....", ".HHS....", ".HSSS...", "..SO....", "..OS....",
+   "..OOS...", "..OOS...", "..OO....", ".SO.....", "..S....."}
+};
 
 // Each row is a three-bit glyph; no platform font or framebuffer allocation.
 constexpr uint8_t GLYPHS[12][5] = {
@@ -30,7 +61,7 @@ void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixe
 }
 
 template<class Pixel>
-void draw(const std::tm &calendar, uint64_t epochSeconds, Pixel pixel) {
+void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel) {
   // Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
   auto plot = [&](int x, int y, uint16_t color) {
     if (x >= 0 && x < 64 && y >= 0 && y < 64) pixel(x, y, color);
@@ -43,16 +74,18 @@ void draw(const std::tm &calendar, uint64_t epochSeconds, Pixel pixel) {
   text(":", 43, 35, 1, AMBER, plot);
   text(value.seconds, 46, 33, 2, AMBER, plot);
   for (int x = 0; x < 64; ++x) plot(x, 63, x % 8 < 3 ? GREEN : PATH);
-  const bool odd = epochSeconds % 2;
-  const char *rows[] = {" GGG ", "GGSS ", "  SS ", " BBB ", " BBB ", "  B  ",
-                        odd ? " W W " : "  WW ", odd ? "W   W" : " W W "};
+  // Poses cycle on the half-second animation tick (monotonic, so no
+  // minute-boundary reset); two walkers keep the existing 2 px/s speed,
+  // now 1 px per 500 ms tick, over an 80-tick (40 s) horizontal wrap. The
+  // displayed time still changes only once per calendar second.
+  const int frame = int(animationTick % 9);
   for (int walker = 0; walker < 2; ++walker) {
-    const int left = int(((epochSeconds % 40) * 2 + walker * 40) % 80) - 8;
-    for (int y = 0; y < 8; ++y) for (int x = 0; x < 5; ++x) {
-      const char part = rows[y][x];
-      if (part == ' ') continue;
-      const uint16_t color = part == 'G' ? GREEN : part == 'S' ? SKIN : part == 'B' ? BLUE : WHITE;
-      plot(left + x + 1, 55 + y, color);
+    const int left = int(((animationTick % 80) + walker * 40) % 80) - 8;
+    for (int y = 0; y < 10; ++y) for (int x = 0; x < 8; ++x) {
+      const char part = FRAMES[frame][y][x];
+      if (part == '.') continue;
+      const uint16_t color = part == 'H' ? HAIR : part == 'S' ? SKIN : OUTFIT;
+      plot(left + x + 1, 53 + y, color);
     }
   }
 }

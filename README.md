@@ -15,7 +15,7 @@ Receptor de PNG para **Adafruit MatrixPortal ESP32-S3 + HUB75 de 64×64**, compa
 
 Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen superior de **3 px** y profundidad de color de **6 bits/canal** en Protomatter. `/health` confirma los tres valores, acelerómetro activo, referencia conservada y recepción de frames tras reiniciar. El usuario observó temblor/parpadeo tras esta actualización. Se ha cargado y verificado la vuelta a **4 bits/canal**, conservando brillo 25% y margen 3 px, para aislar la profundidad de color como posible causa. `/health` confirma `bitDepth: 4`, `brightness: 64`, `topOffset: 3`, acelerómetro activo y recepción de frames; pendiente de confirmación visual de estabilidad.
 
-## Reloj autónomo (actualización local, aún no cargada)
+## Reloj autónomo
 
 El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
 
@@ -23,14 +23,14 @@ El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya
 - Un PNG válido ocupa la pantalla durante **10 segundos** desde su recepción. Al vencer ese plazo aparece el reloj si hay hora válida; si no, conserva el PNG. Otro PNG válido recupera la pantalla inmediatamente.
 - Un PNG rechazado no reemplaza la imagen guardada, no incrementa el contador ni reinicia esos 10 segundos. Si no llega tráfico por pausa del emisor, suspensión del PC o pérdida de red, también puede activarse el reloj.
 - Tras sincronizar, sigue contando sin Wi-Fi mientras tenga alimentación. Una pérdida completa de alimentación requiere sincronización de nuevo. NTP y las lecturas de hora no bloquean el bucle esperando a la red.
-- Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando, con refresco nominal de 1 Hz. Se conservan brillo y rotación; el reloj se dibuja sin desplazamiento vertical sobre las 64 filas completas (camino en la fila 63 y pies en las filas 55–62), sin otro framebuffer.
+- Formato `dd/mm/yyyy`, hora de 24 h, horas/minutos grandes, segundos mayores y dos personajes caminando con las **nueve posturas de lemmings** extraídas de la hoja de referencia `lemmings_reference.png` (362×545 RGBA, 15 px por píxel lógico, origen de cuadrícula (2,3), muestreo por voto en el centro de celda; recortadas a 8×10 px sobre las filas 53–62, sin recortar pies ni antenas, sin tocar el texto ni el camino): pelo verde saturado (`rgb(0,179,0)`), mono azul royal (`rgb(64,64,224)`) y piel rosada (`rgb(240,208,208)`), paleta muestreada de bloques interiores puros. Las nueve posturas ciclan cada **500 ms** desde un tick de animación monotónico (`esp_timer_get_time()`, 1 tick = 0,5 s) y la pantalla del reloj se redibuja también cada 500 ms: cada walker avanza 1 px por tick (2 px/s, velocidad y recorrido de 40 s sin cambios) mientras la hora mostrada sigue cambiando solo una vez por segundo. Se conservan brillo y rotación; el reloj se dibuja sin desplazamiento vertical sobre las 64 filas completas (camino en la fila 63 y pies en las filas 53–62), sin otro framebuffer.
 - La pantalla informativa de Wi-Fi tiene prioridad. Al cerrarla muestra el PNG todavía vigente o el reloj, según corresponda.
 
-**La implementación y sus pruebas locales no equivalen a una validación física.** Esta actualización aún no se ha cargado: quedan por comprobar NTP real, visibilidad y estabilidad en la placa. Entrar en bootloader o subir firmware es un paso separado.
+**Estado de aceptación:** el usuario ha confirmado que la animación ha mejorado y ha dado por buenos los cambios para integrarlos en `main`. El firmware se ha compilado y su UF2 se ha validado frente al binario generado. Esta aceptación visual no equivale a comprobar todos los escenarios de NTP, cambio de horario o pérdida de red; las pruebas locales tampoco sustituyen esas comprobaciones físicas. La hoja `lemmings_reference.png` es una referencia local no distribuida en el repositorio.
 
 ## Continuar el reloj desde el Mac
 
-La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. El firmware del reloj aún no está instalado; no aplicar automáticamente el upload genérico de la sección siguiente a esta actualización.
+La [guía de continuación en macOS](docs/continue-on-macos.md) reúne la rama, el estado verificado, la compilación sin carga y los requisitos pendientes antes de escribir. La guía conserva la evidencia y los pendientes de aquella sesión; para el estado actual de aceptación, consultar la sección anterior. No aplicar automáticamente el upload genérico de la sección siguiente.
 
 ## Compilar y cargar
 
@@ -135,7 +135,7 @@ Recargar gentle-emote con `/reload` **después de configurar el Wi-Fi** y probar
 
 ## Margen y colores
 
-El firmware desplaza **3 px hacia abajo** las coordenadas lógicas del avatar, también al girar: las filas superiores 0–2 quedan negras y se descartan las tres últimas filas del PNG, que en el emisor actual solo contienen el color de fondo (status en 47–51 y phase en 57–61, dentro de los 64 px). Un PNG arbitrario con contenido en las últimas tres filas sí se recortará. Un frame enviado con `X-Emote-State: clock` se dibuja sin desplazamiento y usando las 64 filas; esa clasificación se guarda con el último frame válido y un PNG rechazado no la altera. Los relojes, autónomo y recibido, no sufren desplazamiento. El simulador y el PNG enviado no cambian.
+El firmware dibuja los avatares **sin desplazamiento vertical**, también al girar: conserva las 64 filas del PNG, sin añadir margen superior ni recortar la última fila. Se elimina el margen de 1 px solo para los avatares; la posición del reloj interno no cambia. La aceptación de la animación no constituye una comprobación específica de los bordes del avatar. Un frame enviado con `X-Emote-State: clock` se dibuja sin desplazamiento y usando las 64 filas; esa clasificación se guarda con el último frame válido y un PNG rechazado no la altera. Los relojes, autónomo y recibido, no sufren desplazamiento. El simulador y el PNG enviado no cambian.
 
 Se mantiene la paleta original y el orden RGB. Se probó subir Protomatter de 4 a 6 bits/canal para reducir cuantización, pero el usuario observó temblor/parpadeo. La corrección preparada vuelve a 4 bits/canal para priorizar el refresco estable; la fuente sigue siendo RGB565 (5/6/5 bits). El escalado de brillo redondea en lugar de truncar para conservar mejor los tonos oscuros. La profundidad adicional puede afectar refresco y RAM de ejecución: comprobar estabilidad y colores en la placa. No se ha aplicado gamma ni balance RGB sin una referencia visual del panel.
 

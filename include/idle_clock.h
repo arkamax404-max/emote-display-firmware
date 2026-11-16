@@ -20,8 +20,11 @@ class State {
     return hasFrame ? Source::Frame : Source::Message;
   }
   bool redrawDue(uint32_t now, Source source) const {
+    // Clock redraws every 500 ms so the lemming animation advances twice per
+    // second; the calendar labels only change once per second, so repainting
+    // identical text mid-second leaves the displayed time unchanged.
     return !painted_ || source != paintedSource_ ||
-           (source == Source::Clock && uint32_t(now - lastPaint_) >= 1000);
+           (source == Source::Clock && uint32_t(now - lastPaint_) >= 500);
   }
   void painted(uint32_t now, Source source) {
     painted_ = true; paintedSource_ = source; lastPaint_ = now;

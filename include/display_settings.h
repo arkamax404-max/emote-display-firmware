@@ -3,7 +3,7 @@
 
 namespace panel {
 constexpr uint8_t BRIGHTNESS = 64; // 64 / 255 ~= 25% of maximum channel intensity.
-constexpr uint8_t TOP_OFFSET = 3;
+constexpr uint8_t TOP_OFFSET = 0;
 constexpr uint8_t BIT_DEPTH = 4; // Prefer the previously stable refresh rate over extra color planes.
 constexpr int SIZE = 64;
 constexpr int VISIBLE_SOURCE_ROWS = SIZE - TOP_OFFSET;

@@ -3,7 +3,8 @@
 
 int main() {
   assert(panel::BRIGHTNESS == 64);
-  assert(panel::TOP_OFFSET == 3);
+  assert(panel::TOP_OFFSET == 0);
+  assert(panel::VISIBLE_SOURCE_ROWS == 64);
   assert(panel::BIT_DEPTH == 4);
   assert(panel::color(0) == 0);
   assert(panel::color(0xffff) == 0x4208);
@@ -30,7 +31,7 @@ int main() {
   }
   // All drawn pixels remain inside 64 rows; both text labels still fit.
   for (int y = 0; y < panel::VISIBLE_SOURCE_ROWS; ++y) {
-    assert(y + panel::TOP_OFFSET >= 3 && y + panel::TOP_OFFSET < 64);
+    assert(y + panel::TOP_OFFSET == y && y + panel::TOP_OFFSET < 64);
   }
   assert(58 + panel::TOP_OFFSET < 64); // Last lit phase-text row.
 }

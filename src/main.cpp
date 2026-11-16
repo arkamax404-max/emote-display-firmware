@@ -6,6 +6,7 @@
 #include "display_settings.h"
 #include "wifi_info.h"
 #include <ESPmDNS.h>
+#include <esp_timer.h>
 #include "frame_decoder.h"
 #include <Preferences.h>
 #include <WiFi.h>
@@ -72,7 +73,11 @@ static void renderDisplay() {
   }
   if (source == idle_clock::Source::Clock) {
     // The renderer owns the full 64-row canvas; no vertical offset here.
-    idle_clock::draw(calendar, uint64_t(epoch), [](int x, int y, uint16_t color) {
+    // Half-second animation tick from the monotonic ESP timer: poses and
+    // positions advance twice per second while the calendar seconds text
+    // only changes once per second.
+    const uint64_t animationTick = uint64_t(esp_timer_get_time()) / 500000;
+    idle_clock::draw(calendar, animationTick, [](int x, int y, uint16_t color) {
       matrix.drawPixel(x, y, panel::color(color));
     });
     matrix.show();
@@ -89,8 +94,8 @@ static void renderDisplay() {
     matrix.show();
     return;
   }
-  // Avatar frames keep the 3 px top margin and drop the sender's three
-  // bottom background rows; sender clock frames use all 64 rows at y0.
+  // Avatar frames now use all 64 rows at y0 without a top margin or crop.
+  // Sender clock positioning and the autonomous clock remain unchanged.
   // Apply after setRotation so the margin always follows the displayed top.
   const int rows = frameIsClock ? panel::SIZE : panel::VISIBLE_SOURCE_ROWS;
   const int offset = frameIsClock ? 0 : panel::TOP_OFFSET;
