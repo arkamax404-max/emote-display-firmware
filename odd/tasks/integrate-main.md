@@ -10,7 +10,7 @@ Scope: Git integration, README conflict resolution, existing tests and target bu
 - T1 | S1 | parent Git inventory/preservation | done | commit: none (read-only)
 - T2 | S1 | parent merge + README resolution | done | commit: 84c4717
 - T3 | S1 | parent verification: target build + available suite | done | commit: 84c4717
-- T4 | S1 | parent push branch, merge into main, publish, switch | pending | commit: pending
+- T4 | S1 | parent push branch, merge into main, publish, switch | done | commit: e0fee2a
 - T5 | S2 | branch deletion (remote + local) | blocked: awaits user verification of main | commit: pending
 
 ## Log
@@ -22,3 +22,5 @@ Scope: Git integration, README conflict resolution, existing tests and target bu
 - L6: README.md conflict resolved as a union: kept the local acceptance state and added the verified v1.0.0 recording state, keeping the physical-validation caveat and the warning not to re-run the generic upload. The "Continuar el reloj desde el Mac" section now links the v1.0.0 record, the continuation guide and the previous ROM preparation. 22 authored lines net.
 - L7: Merge commit 84c4717. Containment re-checked: origin/main, origin/feat/sender-ip-counters, origin/feat/clock-sender-integration and origin/feat/autonomous-idle-clock are all ancestors of HEAD. The src/main.cpp auto-merge was reviewed seam by seam: the local side keeps esp_timer tick, full-canvas clock drawing and frameIsClock classification, while the incoming side adds firmware::drawVersion, SenderStats/SenderConnection and the sender IP capture.
 - L8: Verification: target build `pio run` exit 0 (RAM 47.2%, 154688/327680 bytes; flash 41.7%, 874445/2097152 bytes). The native suite is unavailable on this host: 16 of 17 test cases fail with FileNotFoundError because clang++ is absent (only ESP32 cross-toolchains are installed); no test failed on an assertion. The single compiler-independent test, test_version_is_only_integrated_in_diagnostic_branch, passed and covers the src/main.cpp ordering seam that the merge could have broken.
+- L9: Delivery: feat/autonomous-idle-clock pushed 776843b..e0fee2a. main fast-forwarded (--ff-only, aec717e..e0fee2a) and pushed, so main and origin/main now point at the same commit as the feature branch. Re-verified containment: origin/feat/sender-ip-counters, origin/feat/clock-sender-integration, origin/feat/autonomous-idle-clock and the local feature branch are all ancestors of origin/main. Rebuild on main exit 0 (RAM 47.2%, flash 41.7%).
+- L10: Deletion deferred to the user's verification (S2). All three remote feature branches and the local branch are now redundant: their commits are reachable from origin/main. Untracked working files (.pi/, d.las, lemmings_reference.png, odd/tasks/clock-vertical-offset.md) remain unpublished by intent; stash@{0} "preserve local upload notes during main integration" is preserved untouched.
