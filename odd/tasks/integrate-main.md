@@ -11,7 +11,7 @@ Scope: Git integration, README conflict resolution, existing tests and target bu
 - T2 | S1 | parent merge + README resolution | done | commit: 84c4717
 - T3 | S1 | parent verification: target build + available suite | done | commit: 84c4717
 - T4 | S1 | parent push branch, merge into main, publish, switch | done | commit: e0fee2a
-- T5 | S2 | branch deletion (remote + local) | blocked: awaits user verification of main | commit: pending
+- T5 | S2 | branch deletion (remote + local) | done | commit: pending (docs-only record)
 
 ## Log
 - L1: User request verbatim: "integra las ramas que tengamos abiertas y deja todo en main"
@@ -24,3 +24,5 @@ Scope: Git integration, README conflict resolution, existing tests and target bu
 - L8: Verification: target build `pio run` exit 0 (RAM 47.2%, 154688/327680 bytes; flash 41.7%, 874445/2097152 bytes). The native suite is unavailable on this host: 16 of 17 test cases fail with FileNotFoundError because clang++ is absent (only ESP32 cross-toolchains are installed); no test failed on an assertion. The single compiler-independent test, test_version_is_only_integrated_in_diagnostic_branch, passed and covers the src/main.cpp ordering seam that the merge could have broken.
 - L9: Delivery: feat/autonomous-idle-clock pushed 776843b..e0fee2a. main fast-forwarded (--ff-only, aec717e..e0fee2a) and pushed, so main and origin/main now point at the same commit as the feature branch. Re-verified containment: origin/feat/sender-ip-counters, origin/feat/clock-sender-integration, origin/feat/autonomous-idle-clock and the local feature branch are all ancestors of origin/main. Rebuild on main exit 0 (RAM 47.2%, flash 41.7%).
 - L10: Deletion deferred to the user's verification (S2). All three remote feature branches and the local branch are now redundant: their commits are reachable from origin/main. Untracked working files (.pi/, d.las, lemmings_reference.png, odd/tasks/clock-vertical-offset.md) remain unpublished by intent; stash@{0} "preserve local upload notes during main integration" is preserved untouched.
+- L11: User authorization verbatim: "elimina las ramas señaladas como eliminables".
+- L12: Deletion executed behind a fresh containment gate: `git fetch --prune` then `git merge-base --is-ancestor` for each of the four branches against origin/main, aborting before any deletion if one failed. All four passed. Deleted remotely feat/sender-ip-counters, feat/clock-sender-integration and feat/autonomous-idle-clock, then locally feat/autonomous-idle-clock (was e0fee2a, merged). Final state: `git ls-remote --heads origin` lists only refs/heads/main at 4ee5436, and the only local branch is main tracking origin/main. `git fsck` reported nothing. stash@{0} and the untracked files remain untouched.
