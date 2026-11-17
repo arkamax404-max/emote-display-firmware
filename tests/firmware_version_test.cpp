@@ -20,7 +20,7 @@ int main() {
   firmware::drawVersion(display, "READY", "SEND PNG");
   const std::vector<std::string> expected = {
       "size:1", "color:" + std::to_string(panel::color(display.color565(128, 128, 128))),
-      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.0.0"};
+      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.1.0"};
   assert(display.calls == expected);
   assert(44 + panel::TOP_OFFSET + 8 <= panel::SIZE);
   for (const auto &message : std::vector<std::pair<const char *, const char *>>{

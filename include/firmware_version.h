@@ -3,7 +3,7 @@
 #include "display_settings.h"
 
 namespace firmware {
-constexpr const char *VERSION = "v1.0.0";
+constexpr const char *VERSION = "v1.1.0";
 
 // Add only the READY footer; leave existing diagnostic rendering untouched.
 template <typename Display>
