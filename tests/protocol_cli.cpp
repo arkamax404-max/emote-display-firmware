@@ -17,6 +17,12 @@ int main(int argc, char **argv) {
     receiver::Request request;
     const int status = receiver::parseHeaders(input, request);
     std::cout << status << (request.clockState ? " clock" : " avatar");
+  } else if (argc == 2 && std::string(argv[1]) == "session") {
+    receiver::Request request;
+    const int status = receiver::parseHeaders(input, request);
+    std::cout << status << ' ' << receiver::kindName(request) << ' '
+              << (request.hasSession ? 1 : 0) << ' '
+              << (request.hasSession ? request.sessionId : "-") << '\n';
   } else {
     receiver::Request request;
     std::cout << receiver::parseHeaders(input, request);

@@ -3,11 +3,32 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include "session_owner.h"
 
 namespace receiver {
 constexpr size_t MAX_HEADERS = 4096;
 constexpr size_t MAX_PNG = 32768;
-struct Request { size_t length = 0; bool health = false; bool clockState = false; };
+struct Request {
+  enum class Kind : uint8_t { Image, Claim, Heartbeat, Release };
+  size_t length = 0;
+  bool health = false;
+  bool clockState = false;
+  Kind kind = Kind::Image;
+  bool hasSession = false;
+  // Bounded storage for the single validated session identity; never
+  // disclosed by /health.
+  char sessionId[session::MAX_ID_LENGTH + 1] = {};
+};
+
+inline const char *kindName(const Request &request) {
+  if (request.health) return "health";
+  switch (request.kind) {
+    case Request::Kind::Claim: return "claim";
+    case Request::Kind::Heartbeat: return "heartbeat";
+    case Request::Kind::Release: return "release";
+    default: return "image";
+  }
+}
 
 inline std::string trim(std::string value) {
   const auto first = value.find_first_not_of(" \t");
@@ -26,7 +47,17 @@ inline int parseHeaders(const std::string &headers, Request &request) {
   const size_t first = headers.find("\r\n");
   const std::string line = headers.substr(0, first);
   request.health = line == "GET /health HTTP/1.1" || line == "GET /health HTTP/1.0";
-  if (!request.health && line != "POST /emote HTTP/1.1" && line != "POST /emote HTTP/1.0") return 404;
+  if (!request.health) {
+    if (line == "POST /emote HTTP/1.1" || line == "POST /emote HTTP/1.0") {
+      request.kind = Request::Kind::Image;
+    } else if (line == "POST /emote/claim HTTP/1.1" || line == "POST /emote/claim HTTP/1.0") {
+      request.kind = Request::Kind::Claim;
+    } else if (line == "POST /emote/heartbeat HTTP/1.1" || line == "POST /emote/heartbeat HTTP/1.0") {
+      request.kind = Request::Kind::Heartbeat;
+    } else if (line == "POST /emote/release HTTP/1.1" || line == "POST /emote/release HTTP/1.0") {
+      request.kind = Request::Kind::Release;
+    } else return 404;
+  }
   bool hasLength = false, hasType = false, hasVersion = false;
   size_t start = first + 2;
   while (start < headers.size() - 2) {
@@ -51,6 +82,14 @@ inline int parseHeaders(const std::string &headers, Request &request) {
     } else if (key == "x-emote-version") {
       if (hasVersion || value != "1") return 400;
       hasVersion = true;
+    } else if (key == "x-emote-session-id") {
+      // Exactly one session identity per request. Duplicates and malformed
+      // values reject the request before any ownership effect.
+      if (request.hasSession) return 400;
+      if (!session::validSessionId(value.data(), value.size())) return 400;
+      std::memcpy(request.sessionId, value.data(), value.size());
+      request.sessionId[value.size()] = '\0';
+      request.hasSession = true;
     } else if (key == "x-emote-state") {
       // Sender metadata for the clock skin. Missing or unknown values keep
       // the default avatar rendering; no value is rejected here.
@@ -60,9 +99,17 @@ inline int parseHeaders(const std::string &headers, Request &request) {
   }
   if (request.health) return request.length == 0 ? 200 : 400;
   if (!hasLength) return 411;
-  if (!request.length) return 400;
-  if (!hasType) return 415;
+  if (request.kind == Request::Kind::Image) {
+    if (!request.length) return 400;
+    if (!hasType) return 415;
+    if (!hasVersion) return 400;
+    return 200;
+  }
+  // Bodyless control routes use the fixed protocol: version header, no
+  // payload, and exactly one valid session identity.
   if (!hasVersion) return 400;
+  if (request.length) return 400;
+  if (!request.hasSession) return 400;
   return 200;
 }
 inline uint32_t be32(const uint8_t *p) {

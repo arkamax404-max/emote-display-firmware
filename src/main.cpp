@@ -30,6 +30,7 @@ static bool frameIsClock = false;
 static const char *messageFirst = "", *messageSecond = "";
 static WiFiServer server(80);
 static WiFiClient client;
+static session::Owner sessionOwner;
 static Preferences preferences;
 static uint8_t pngBytes[receiver::MAX_PNG];
 static uint32_t accepted = 0;
@@ -189,9 +190,11 @@ static void closeRequest() {
   request = receiver::Request{};
 }
 
-static void reply(int code, const String &body) {
-  client.printf("HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %u\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
-                code, code == 200 ? "OK" : "Error", static_cast<unsigned>(body.length()));
+// extra carries additional response headers (each ending in CRLF), used by
+// the session control routes to mark successful ownership responses.
+static void reply(int code, const String &body, const char *extra = "") {
+  client.printf("HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n%sContent-Length: %u\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+                code, code == 200 ? "OK" : "Error", extra, static_cast<unsigned>(body.length()));
   client.print(body);
   closeRequest();
 }
@@ -228,13 +231,54 @@ static void pollHttp() {
             ",\"bitDepth\":" + String(panel::BIT_DEPTH) + ",\"wifiInfo\":" + (wifiInfo.visible() ? "true" : "false") +
             ",\"accelerometer\":" + (accelerometerReady ? "true" : "false") +
             ",\"rotation\":" + String(orientation.rotation() * 90) +
-            ",\"orientationCalibrated\":" + (orientation.reference() >= 0 ? "true" : "false") + "}"); return;
+            ",\"orientationCalibrated\":" + (orientation.reference() >= 0 ? "true" : "false") +
+            // Additive session ownership fields; the owner identity is never
+            // disclosed. remainingMs also evaluates expiry at this moment.
+            ",\"sessionOwnership\":true,\"ownershipActive\":" +
+            (sessionOwner.active() ? "true" : "false") +
+            ",\"ownershipRemainingMs\":" + String(sessionOwner.remainingMs(millis())) + "}"); return;
+      }
+      if (request.kind != receiver::Request::Kind::Image) {
+        // Session controls: claim/heartbeat/release. They never touch the
+        // displayed image, the frame classification or the autonomous clock
+        // timer, and the parser already guaranteed exactly one valid identity.
+        const uint32_t now = millis();
+        const char *id = request.sessionId;
+        int control;
+        switch (request.kind) {
+          case receiver::Request::Kind::Claim: control = sessionOwner.claim(id, now); break;
+          case receiver::Request::Kind::Heartbeat: control = sessionOwner.heartbeat(id, now); break;
+          default: control = sessionOwner.release(id, now); break;
+        }
+        if (control == 200) {
+          // Only successful control responses carry the ownership marker; a
+          // sender treats anything else as legacy delivery with a warning.
+          reply(200, "{\"ok\":true}", "X-Emote-Ownership: 1\r\n");
+        } else if (control == 409) {
+          reply(409, "{\"error\":\"owned by another session\"}");
+        } else {
+          reply(400, "{\"error\":\"invalid session id\"}");
+        }
+        return;
       }
       readingBody = true;
     } else {
       pngBytes[received++] = static_cast<uint8_t>(value);
       if (received == request.length) {
-        if (showPng()) reply(200, "{\"ok\":true}");
+        // The declared body is fully consumed before the ownership decision,
+        // so a rejected foreign or sessionless image leaves the displayed
+        // frame, its classification, the frame counter and the 10 s clock
+        // timer untouched.
+        if (sessionOwner.pngAccess(request.hasSession, request.sessionId, millis()) != 200) {
+          reply(409, "{\"error\":\"owned by another session\"}");
+          return;
+        }
+        if (showPng()) {
+          // Lease renewal only for a valid owned PNG after successful
+          // presentation; ownerless images (legacy behavior) never claim.
+          sessionOwner.renewPng(millis());
+          reply(200, "{\"ok\":true}");
+        }
         else reply(422, "{\"error\":\"invalid 64x64 RGBA PNG\"}");
         return;
       }
@@ -361,5 +405,8 @@ void loop() {
   pollWifiInfoButton();
   pollWifi();
   pollClock();
+  // Lease expiry is also evaluated before every ownership decision; this
+  // loop-level check keeps an abandoned reservation from outliving silence.
+  sessionOwner.expire(millis());
   delay(1);
 }

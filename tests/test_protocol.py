@@ -83,6 +83,14 @@ class ProtocolTests(unittest.TestCase):
                                  (200, "avatar"))
                 self.assertEqual(self.parse(self.headers(b"X-Emote-State: " + value + b"\r\n")), 200)
 
+    def test_session_header_on_image(self):
+        # The session header is optional metadata for PNG delivery: a valid
+        # value must keep the legacy image request accepted, while duplicates
+        # or malformed values reject the whole request without side effects.
+        self.assertEqual(self.parse(self.headers(b"X-Emote-Session-Id: abcd1234\r\n")), 200)
+        self.assertEqual(self.parse(self.headers(b"X-Emote-Session-Id: bad id\r\n")), 400)
+        self.assertEqual(self.parse(self.headers(b"X-Emote-Session-Id: a\r\nX-Emote-Session-Id: b\r\n")), 400)
+
     def test_sender_png(self):
         self.assertEqual(self.parse(png(), "png"), 200)
 
