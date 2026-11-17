@@ -15,9 +15,22 @@ Receptor de PNG para **Adafruit MatrixPortal ESP32-S3 + HUB75 de 64×64**, compa
 
 Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen superior de **3 px** y profundidad de color de **6 bits/canal** en Protomatter. `/health` confirma los tres valores, acelerómetro activo, referencia conservada y recepción de frames tras reiniciar. El usuario observó temblor/parpadeo tras esta actualización. Se ha cargado y verificado la vuelta a **4 bits/canal**, conservando brillo 25% y margen 3 px, para aislar la profundidad de color como posible causa. `/health` confirma `bitDepth: 4`, `brightness: 64`, `topOffset: 3`, acelerómetro activo y recepción de frames; pendiente de confirmación visual de estabilidad.
 
+## Versión publicada
+
+La release [**v1.1.0**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.1.0) publica el firmware que corre hoy la placa: reserva del display por sesión (`/emote displayOn` / `displayOff`, rutas `claim`/`heartbeat`/`release`) y título de la sesión en la banda superior del reloj autónomo, alternando con la fecha cada 5 s.
+
+| Asset | Contenido |
+| --- | --- |
+| [`firmware-panel-title.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.1.0/firmware-panel-title.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 1 759 744 bytes, SHA256 `3e13d4bd14cc63368f2956aaf3d6643d8a8f01c2d1acfea42b7fe05bf2dd6b9a` |
+| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.1.0/manifest.json) | Procedencia reproducible: binario de origen y su hash, imágenes de entrada, comandos exactos, herramienta, política de padding y `device_write_performed: false` |
+
+Para grabarla: doble reset para entrar en TinyUF2, copia el `.uf2` al volumen `MATRXS3BOOT` y espera a que el bootloader reinicie. No hay que borrar nada ni tocar `CURRENT.UF2`. La imagen no contiene credenciales: el Wi-Fi y el resto de la configuración viven en la flash del dispositivo.
+
+Verificación de esta versión: 53/53 pruebas anfitrionas, verificación independiente sin divergencias en 207 casos de validación frente al receptor de escritorio, 162/162 operaciones no modificadas idénticas, y comportamiento visible validado por el usuario en la placa.
+
 ## Reloj autónomo (v1.0.0 grabado; validación física pendiente)
 
-**Grabación verificada:** el firmware `v1.0.0` quedó en OTA0 mediante una única carga TinyUF2 autorizada. La copia del Mac devolvió un error de E/S; no se reenvió. Dos lecturas posteriores de `CURRENT.UF2`, su decodificación oficial y una revisión independiente confirmaron los 2 MiB completos: imagen nueva exacta más la cola anterior preservada. El error de copia permanece registrado; esta comprobación no demuestra la conservación de toda la flash ni el funcionamiento físico del reloj.
+**Grabación verificada:** el firmware `v1.0.0` quedó en OTA0 mediante una única carga TinyUF2 autorizada. La copia del Mac devolvió un error de E/S; no se reenvió. Dos lecturas posteriores de `CURRENT.UF2`, su decodificación oficial y una revisión independiente confirmaron los 2 MiB completos: imagen nueva exacta más la cola anterior preservada. El error de copia permanece registrado; esta comprobación no demuestra la conservación de toda la flash ni el funcionamiento físico del reloj. **Nota:** la placa se actualizó después a `v1.1.0` (ver [Versión publicada](#versión-publicada)); este apartado queda como historial de aquella grabación.
 
 El panel puede mostrar la hora sin el agente ni el PC. Usa NTP sobre el Wi-Fi ya configurado y la zona **Europe/Madrid**, con cambio automático de horario de verano/invierno; no cambia credenciales ni añade comandos USB o campos HTTP.
 
