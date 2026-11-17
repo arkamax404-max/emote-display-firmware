@@ -1,4 +1,5 @@
 #include "receiver_protocol.h"
+#include "idle_clock.h"
 #include <iostream>
 #include <iterator>
 #ifdef _WIN32
@@ -23,6 +24,34 @@ int main(int argc, char **argv) {
     std::cout << status << ' ' << receiver::kindName(request) << ' '
               << (request.hasSession ? 1 : 0) << ' '
               << (request.hasSession ? request.sessionId : "-") << '\n';
+  } else if (argc == 2 && std::string(argv[1]) == "store") {
+    // Sequential session-title commit simulation: requests separated by a
+    // \n----\n line share one idle_clock::State in this process. Each line is
+    // "<status> <title or ->" plus " invalid-name" when the request carried
+    // the distinct project-name rejection. Only a 200 image commits or clears
+    // the stored title; only a 200 control refreshes its liveness.
+    idle_clock::State state;
+    const std::string separator = "\n----\n";
+    size_t start = 0;
+    while (start < input.size()) {
+      const size_t next = input.find(separator, start);
+      const std::string part = input.substr(
+          start, next == std::string::npos ? std::string::npos : next - start);
+      receiver::Request request;
+      const int status = receiver::parseHeaders(part, request);
+      if (status == 200) {
+        if (request.kind == receiver::Request::Kind::Image)
+          state.commitTitle(1000, request.hasName, request.projectName);
+        else
+          state.touchTitle(1000);
+      }
+      const char *title = state.sessionTitle(1000);
+      std::cout << status << ' ' << (*title ? title : "-")
+                << (request.hasName && !request.nameValid ? " invalid-name" : "")
+                << '\n';
+      if (next == std::string::npos) break;
+      start = next + separator.size();
+    }
   } else {
     receiver::Request request;
     std::cout << receiver::parseHeaders(input, request);

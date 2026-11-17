@@ -196,6 +196,88 @@ int main(int argc, char **argv) {
     bool crown = false; // Green hair of pose 8 in the top sprite row.
     for (int x = 1; x <= 8; ++x) crown |= image[54 * 64 + x] == EXP_HAIR;
     CHECK(crown);
+  } else if (test == "titlephase") {
+    // S5: the top band (rows 1..5) alternates the centered date with the
+    // session title on absolute-epoch half-decade (5 s) ticks.
+    std::tm calendar = {};
+    calendar.tm_year = 126; calendar.tm_mon = 10; calendar.tm_mday = 9;
+    calendar.tm_hour = 12; calendar.tm_min = 34; calendar.tm_sec = 56;
+    std::array<uint16_t, 64 * 64> even, odd, plain;
+    auto render = [&](uint64_t epochMillis, const char *title,
+                      std::array<uint16_t, 64 * 64> &out) {
+      out.fill(0xffff);
+      idle_clock::draw(calendar, 4, epochMillis, title,
+                       [&](int x, int y, uint16_t color) { out[y * 64 + x] = color; });
+    };
+    render(10000, "HI", even);  // floor(10000/5000) mod 2 == 0: date phase.
+    render(5000, "HI", odd);    // Odd phase: title replaces the date.
+    render(10000, "", plain);
+    // Even phase keeps the canonical centered date and ignores the title.
+    CHECK(even[1 * 64 + 12] == idle_clock::MUTED);
+    CHECK(even == plain);
+    // Odd phase shows the centered title: "HI" is 2 cells, left = (64-7)/2 = 28.
+    CHECK(odd[1 * 64 + 28] == idle_clock::MUTED); // 'H' 101 first row.
+    CHECK(odd[1 * 64 + 30] == idle_clock::MUTED);
+    CHECK(odd[1 * 64 + 12] == 0);                 // date pixel cleared.
+    // An empty or absent name always shows the date in both phases.
+    render(5000, "", plain);
+    CHECK(plain[1 * 64 + 12] == idle_clock::MUTED);
+    // Every pixel outside rows 1..5 keeps the canonical clock content.
+    for (int y = 6; y < 64; ++y) for (int x = 0; x < 64; ++x)
+      CHECK(even[y * 64 + x] == odd[y * 64 + x]);
+    for (int x = 0; x < 64; ++x) CHECK(even[x] == odd[x]);
+  } else if (test == "truncation") {
+    // S5: at most 16 cells; 17 or more becomes 13 cells plus '...'.
+    std::tm calendar = {};
+    calendar.tm_year = 126; calendar.tm_mon = 10; calendar.tm_mday = 9;
+    std::array<uint16_t, 64 * 64> image;
+    auto render = [&](const char *title) {
+      image.fill(0xffff);
+      idle_clock::draw(calendar, 4, 5000, title,
+                       [&](int x, int y, uint16_t color) { image[y * 64 + x] = color; });
+    };
+    render("0123456789ABCDEF"); // Exactly 16 cells, left = (64-63)/2 = 0.
+    CHECK(image[1 * 64 + 0] == idle_clock::MUTED);  // '0' first row 111.
+    CHECK(image[1 * 64 + 62] == idle_clock::MUTED); // 'F' first row 111.
+    render("ABCDEFGHIJKLMNOPQ"); // 17 cells: first 13 + '...' (16 cells, left = 0).
+    CHECK(image[1 * 64 + 1] == idle_clock::MUTED);   // 'A' apex, row 010.
+    CHECK(image[1 * 64 + 0] == 0);
+    CHECK(image[2 * 64 + 52] == 0);            // 14th letter must not be drawn.
+    CHECK(image[5 * 64 + 53] == idle_clock::MUTED); // '.' dots in cells 13..15.
+    CHECK(image[5 * 64 + 61] == idle_clock::MUTED);
+  } else if (test == "nosession") {
+    // S5 staleness: more than 15 s without an accepted image or successful
+    // control turns the title phase into *NO SESSION*; the next one restores.
+    idle_clock::State state;
+    CHECK(std::string(state.sessionTitle(0)) == ""); // Boot: date in both phases.
+    state.commitTitle(1000, true, "LAB");
+    CHECK(std::string(state.sessionTitle(1000)) == "LAB");
+    CHECK(std::string(state.sessionTitle(16000)) == "LAB");   // 15 s: not stale.
+    CHECK(std::string(state.sessionTitle(16001)) == "*NO SESSION*");
+    state.touchTitle(20000); // Successful control restores the stored name.
+    CHECK(std::string(state.sessionTitle(20000)) == "LAB");
+    CHECK(std::string(state.sessionTitle(35001)) == "*NO SESSION*");
+    state.commitTitle(40000, false, ""); // Accepted image without header clears.
+    CHECK(std::string(state.sessionTitle(40001)) == "");
+    state.commitTitle(41000, true, "NEW");
+    CHECK(std::string(state.sessionTitle(41000)) == "NEW");
+    state.pngResult(false, 50000); // Rejected traffic never refreshes liveness.
+    CHECK(std::string(state.sessionTitle(56001)) == "*NO SESSION*");
+    // The stale marker renders in the odd-phase band: '*NO SESSION*' is 12
+    // cells, centered at left = (64 - 47) / 2 = 8.
+    std::tm calendar = {};
+    calendar.tm_year = 126; calendar.tm_mon = 10; calendar.tm_mday = 9;
+    std::array<uint16_t, 64 * 64> image;
+    image.fill(0xffff);
+    idle_clock::draw(calendar, 4, 5000, state.sessionTitle(56001),
+                     [&](int x, int y, uint16_t color) { image[y * 64 + x] = color; });
+    CHECK(image[2 * 64 + 8] == idle_clock::MUTED); // '*' row 101 at x=8, 10.
+    CHECK(image[2 * 64 + 10] == idle_clock::MUTED);
+    CHECK(image[1 * 64 + 13] == 0);                // Date replaced (blank in title).
+    image.fill(0xffff);
+    idle_clock::draw(calendar, 4, 10000, state.sessionTitle(56001),
+                     [&](int x, int y, uint16_t color) { image[y * 64 + x] = color; });
+    CHECK(image[1 * 64 + 12] == idle_clock::MUTED); // Even phase keeps the date.
   } else return 2;
   std::cout << "OK\n";
 }

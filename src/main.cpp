@@ -82,7 +82,14 @@ static void renderDisplay() {
     // positions advance twice per second while the calendar seconds text
     // only changes once per second.
     const uint64_t animationTick = uint64_t(esp_timer_get_time()) / 500000;
-    idle_clock::draw(calendar, animationTick, [](int x, int y, uint16_t color) {
+    // S5 alternation phase from the absolute epoch (the same clock the
+    // calendar labels use) with the sub-second fraction from the monotonic
+    // timer, so every panel flips together; injectable in the native tests.
+    const uint64_t epochMillis = uint64_t(epoch) * 1000 +
+                                 uint64_t(esp_timer_get_time() / 1000) % 1000;
+    idle_clock::draw(calendar, animationTick, epochMillis,
+                     clockState.sessionTitle(millis()),
+                     [](int x, int y, uint16_t color) {
       matrix.drawPixel(x, y, panel::color(color));
     });
     matrix.show();
@@ -224,6 +231,11 @@ static void pollHttp() {
       if (headers.size() > receiver::MAX_HEADERS) { reply(431, "{\"error\":\"headers too large\"}"); return; }
       if (headers.size() < 4 || headers.compare(headers.size() - 4, 4, "\r\n\r\n")) continue;
       const int status = receiver::parseHeaders(headers, request);
+      if (status == 400 && request.hasName && !request.nameValid) {
+        // Distinct parser result for an invalid or duplicate
+        // X-Emote-Project-Name: the desktop parity body, no state change.
+        reply(400, "invalid project name\n"); return;
+      }
       if (status != 200) { reply(status, "{\"error\":\"unsupported request\"}"); return; }
       if (request.health) {
         reply(200, "{\"ok\":true,\"width\":64,\"height\":64,\"frames\":" + String(accepted) +
@@ -253,6 +265,8 @@ static void pollHttp() {
         if (control == 200) {
           // Only successful control responses carry the ownership marker; a
           // sender treats anything else as legacy delivery with a warning.
+          // Success also refreshes the session-title liveness window.
+          clockState.touchTitle(now);
           reply(200, "{\"ok\":true}", "X-Emote-Ownership: 1\r\n");
         } else if (control == 409) {
           reply(409, "{\"error\":\"owned by another session\"}");
@@ -276,7 +290,12 @@ static void pollHttp() {
         if (showPng()) {
           // Lease renewal only for a valid owned PNG after successful
           // presentation; ownerless images (legacy behavior) never claim.
+          // The session title commits only here, after the ownership
+          // admission and a successful presentation, so a rejected foreign,
+          // sessionless or invalid image never renames the display; an image
+          // without the header clears the stored name.
           sessionOwner.renewPng(millis());
+          clockState.commitTitle(millis(), request.hasName, request.projectName);
           reply(200, "{\"ok\":true}");
         }
         else reply(422, "{\"error\":\"invalid 64x64 RGBA PNG\"}");

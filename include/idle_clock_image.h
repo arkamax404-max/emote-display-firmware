@@ -42,16 +42,44 @@ constexpr char FRAMES[9][10][9] = {
 };
 
 // Each row is a three-bit glyph; no platform font or framebuffer allocation.
-constexpr uint8_t GLYPHS[12][5] = {
+// Digits, '/' and ':' are the canonical date/time glyphs; the letters, '*',
+// '_' and '-' are label-only additions (S5) mirroring the desktop ID_GLYPHS
+// table, so the date, time and walkers never move or change bitmap.
+constexpr uint8_t GLYPHS[42][5] = {
   {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7},
   {5,5,7,1,1}, {7,4,7,1,7}, {7,4,7,5,7}, {7,1,2,2,2},
-  {7,5,7,5,7}, {7,5,7,1,7}, {1,1,2,4,4}, {0,2,0,2,0}
+  {7,5,7,5,7}, {7,5,7,1,7}, {1,1,2,4,4}, {0,2,0,2,0},
+  // A..Z, 3x5, identical to the desktop label table.
+  {2,5,7,5,5}, {6,5,6,5,6}, {3,4,4,4,3}, {6,5,5,5,6},
+  {7,4,6,4,7}, {7,4,6,4,4}, {3,4,5,5,3}, {5,5,7,5,5},
+  {7,2,2,2,7}, {1,1,1,5,2}, {5,5,6,5,5}, {4,4,4,4,7},
+  {5,7,7,5,5}, {5,7,7,7,5}, {2,5,5,5,2}, {6,5,6,4,4},
+  {2,5,5,7,3}, {6,5,6,5,5}, {3,4,2,1,6}, {7,2,2,2,2},
+  {5,5,5,5,7}, {5,5,5,5,2}, {5,5,7,7,5}, {5,5,2,5,5},
+  {5,5,2,2,2}, {7,1,2,4,7},
+  // '.', '*' and '_'/'-' for labels like *NO SESSION* and '...' truncation.
+  {0,0,0,0,2}, {0,5,2,5,0}, {0,0,0,0,7}, {0,0,7,0,0}
 };
+
+// Canonical 3x5 lookup for date/time characters; label characters resolve
+// through the extended table. Unknown characters draw nothing (blank cells).
+inline int glyphIndex(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c == '/') return 10;
+  if (c == ':') return 11;
+  if (c >= 'A' && c <= 'Z') return 12 + (c - 'A');
+  if (c == '.') return 38;
+  if (c == '*') return 39;
+  if (c == '_') return 40;
+  if (c == '-') return 41;
+  return -1;
+}
 
 template<class Pixel>
 void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixel) {
   for (; *value; ++value, x += 4 * scale) {
-    const int glyph = *value >= '0' && *value <= '9' ? *value - '0' : *value == '/' ? 10 : 11;
+    const int glyph = glyphIndex(*value);
+    if (glyph < 0) continue;
     for (int row = 0; row < 5; ++row) for (int col = 0; col < 3; ++col) {
       if (!(GLYPHS[glyph][row] & (4 >> col))) continue;
       for (int dy = 0; dy < scale; ++dy) for (int dx = 0; dx < scale; ++dx)
@@ -60,9 +88,10 @@ void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixe
   }
 }
 
+
+// Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
 template<class Pixel>
 void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel) {
-  // Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
   auto plot = [&](int x, int y, uint16_t color) {
     if (x >= 0 && x < 64 && y >= 0 && y < 64) pixel(x, y, color);
   };
@@ -88,5 +117,46 @@ void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel) {
       plot(left + x + 1, 53 + y, color);
     }
   }
+}
+
+// S5: draw the canonical clock first, then in the odd half of the
+// absolute-epoch 5 s alternation (floor(epochMillis / 5000) mod 2 == 1)
+// replace the top band rows 1..5 with the session title instead of the
+// centered DD/MM/YYYY date. The title is ASCII-uppercased, at most 16 cells
+// (17 or more source characters become 13 plus '...'), centered with
+// (64 - (cells * 4 - 1)) / 2, 3x5 glyphs at scale 1, muted ink, y=1. An empty
+// or absent name always shows the date in both phases. Only rows 1..5 are
+// repainted, so every other pixel keeps the canonical content.
+template<class Pixel>
+void draw(const std::tm &calendar, uint64_t animationTick, uint64_t epochMillis,
+          const char *title, Pixel pixel) {
+  draw(calendar, animationTick, pixel);
+  if (!title || !title[0] || (epochMillis / 5000) % 2 == 0) return;
+  for (int y = 1; y <= 5; ++y) for (int x = 0; x < 64; ++x) pixel(x, y, 0);
+  // ASCII-uppercased copy; multibyte UTF-8 sequences pass through untouched.
+  char upper[385];
+  size_t in = 0;
+  for (; title[in] && in < sizeof(upper) - 1; ++in)
+    upper[in] = title[in] >= 'a' && title[in] <= 'z'
+                    ? static_cast<char>(title[in] - 'a' + 'A') : title[in];
+  upper[in] = '\0';
+  int total = 0; // Cells are Unicode scalars, as on the desktop.
+  for (const char *p = upper; *p; ++p)
+    if ((static_cast<unsigned char>(*p) & 0xC0) != 0x80) ++total;
+  if (total == 0) return;
+  const int cells = total > 16 ? 16 : total;
+  const int left = (64 - (cells * 4 - 1)) / 2;
+  const int take = total > 16 ? 13 : total;
+  char label[17]; // 13 title cells plus '...' at most; one byte per cell.
+  int out = 0, seen = 0;
+  for (const char *p = upper; *p && seen < take; ++p) {
+    if ((static_cast<unsigned char>(*p) & 0xC0) == 0x80) continue;
+    // Unsupported scalars reserve a blank cell exactly like the desktop.
+    label[out++] = (static_cast<unsigned char>(*p) & 0x80) ? '\x01' : *p;
+    ++seen;
+  }
+  if (total > 16) { label[out++] = '.'; label[out++] = '.'; label[out++] = '.'; }
+  label[out] = '\0';
+  text(label, left, 1, 1, MUTED, pixel);
 }
 } // namespace idle_clock

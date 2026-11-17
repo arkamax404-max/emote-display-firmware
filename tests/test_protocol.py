@@ -91,6 +91,93 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(self.parse(self.headers(b"X-Emote-Session-Id: bad id\r\n")), 400)
         self.assertEqual(self.parse(self.headers(b"X-Emote-Session-Id: a\r\nX-Emote-Session-Id: b\r\n")), 400)
 
+    def test_project_name_validation_matrix(self):
+        # Desktop parity (S2): one decode pass, '+' literal, '%' needs two hex
+        # digits; valid names ride image requests, every rejection is 400.
+        for value in [b"lab", b"Hello%20World", b"a+b", b"%C3%A9",
+                      b"a" * 128,                      # 128 UTF-16 units
+                      b"%C3%A9" * 128,                 # 128 units, 256 bytes
+                      b"%F0%9F%98%80" * 64]:           # 64 astral scalars = 128 units
+            with self.subTest(value=value[:40]):
+                self.assertEqual(self.parse(self.headers(b"X-Emote-Project-Name: " + value + b"\r\n")), 200)
+        for value in [
+            b"",                                # blank after trim
+            b"%20",                             # decoded blank
+            b".", b"..", b"%2E", b"%2E%2E",     # exactly dot / dotdot
+            b"%", b"%A", b"%ZZ", b"%4",         # malformed escapes
+            b"%C3", b"%FF", b"%C3%28",          # invalid UTF-8 decoded
+            b"%C0%80",                          # overlong
+            b"%ED%A0%80",                       # UTF-16 surrogate
+            b"%0A", b"%1F", b"%00", b"%7F",     # control characters and DEL
+            b"a/b", b"a%2Fb", b"a\\b",          # path separators
+            b"a" * 129,                         # 129 UTF-16 units
+            b"%C3%A9" * 129,                    # 129 units, 258 bytes
+            b"%F0%9F%98%80" * 65,               # 130 units
+            b"a" * 1152,                        # decoded UTF-8 bound
+            b"%41" * 385,                       # encoded bound (1155 bytes)
+        ]:
+            with self.subTest(value=value[:40]):
+                self.assertEqual(self.parse(self.headers(b"X-Emote-Project-Name: " + value + b"\r\n")), 400)
+
+    def test_project_name_duplicate_header_rejects(self):
+        # A second X-Emote-Project-Name header rejects the whole image request.
+        # Bodyless controls are lifecycle endpoints: the desktop receiver skips
+        # the header entirely there (receiver.rs:262), so a duplicate or invalid
+        # value on a control is ignored instead of rejecting the order.
+        self.assertEqual(self.parse(self.headers(
+            b"X-Emote-Project-Name: a\r\nX-Emote-Project-Name: b\r\n")), 400)
+        self.assertEqual(self.parse(
+            b"POST /emote/heartbeat HTTP/1.1\r\nX-Emote-Version: 1\r\n"
+            b"X-Emote-Session-Id: abcd1234\r\nContent-Length: 0\r\n"
+            b"X-Emote-Project-Name: a\r\nX-Emote-Project-Name: b\r\n\r\n"), 200)
+        self.assertEqual(self.parse(
+            b"POST /emote/claim HTTP/1.1\r\nX-Emote-Version: 1\r\n"
+            b"X-Emote-Session-Id: abcd1234\r\nContent-Length: 0\r\n"
+            b"X-Emote-Project-Name: bad id\r\n\r\n"), 200)
+
+    def store(self, raw):
+        out = subprocess.run([str(self.binary), "store"], input=raw,
+                             capture_output=True, check=True).stdout.decode()
+        return out.splitlines()
+
+    def test_image_store_and_absent_clears_name(self):
+        # Only the image path stores the name; a later accepted image
+        # without the header clears it.
+        sep = b"\n----\n"
+        raw = (self.headers(b"X-Emote-Project-Name: LAB\r\n") + sep
+               + self.headers() + sep
+               + self.headers(b"X-Emote-Project-Name: LAB\r\n"))
+        self.assertEqual(self.store(raw), ["200 LAB", "200 -", "200 LAB"])
+
+    def test_rejected_image_is_distinct_and_changes_no_state(self):
+        sep = b"\n----\n"
+        raw = (self.headers(b"X-Emote-Project-Name: LAB\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %0A\r\n"))
+        # The invalid name is a distinct parser result ("invalid-name") and
+        # leaves the stored title untouched.
+        self.assertEqual(self.store(raw), ["200 LAB", "400 LAB invalid-name"])
+
+    def test_controls_ignore_project_name(self):
+        # claim/heartbeat/release never change the stored name, with or without
+        # the header; an invalid or duplicate value is ignored rather than
+        # rejecting the order, exactly like the desktop lifecycle endpoints.
+        sep = b"\n----\n"
+        def control(route, name=None):
+            extra = b"" if name is None else b"X-Emote-Project-Name: " + name + b"\r\n"
+            return (b"POST /emote/" + route + b" HTTP/1.1\r\nX-Emote-Version: 1\r\n"
+                    b"X-Emote-Session-Id: abcd1234\r\nContent-Length: 0\r\n"
+                    + extra + b"\r\n")
+        raw = (self.headers(b"X-Emote-Project-Name: LAB\r\n") + sep
+               + control(b"claim", b"OTHER") + sep
+               + control(b"heartbeat", b"OTHER") + sep
+               + control(b"release", b"OTHER") + sep
+               + control(b"heartbeat") + sep
+               + control(b"heartbeat", b"%0A"))
+        self.assertEqual(self.store(raw),
+                         ["200 LAB", "200 LAB", "200 LAB", "200 LAB", "200 LAB",
+                          "200 LAB"],
+                         "lifecycle endpoints ignore the name, so the stored title survives every control")
+
     def test_sender_png(self):
         self.assertEqual(self.parse(png(), "png"), 200)
 

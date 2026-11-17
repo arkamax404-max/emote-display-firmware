@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include "project_name.h"
 #include "session_owner.h"
 
 namespace receiver {
@@ -18,6 +19,12 @@ struct Request {
   // Bounded storage for the single validated session identity; never
   // disclosed by /health.
   char sessionId[session::MAX_ID_LENGTH + 1] = {};
+  // Validated session title from X-Emote-Project-Name; valid=false means the
+  // header is absent. An invalid value is the distinct result the runtime
+  // answers with 400 "invalid project name\n". Never disclosed by /health.
+  bool hasName = false;
+  bool nameValid = false;
+  char projectName[project_name::STORE] = {};
 };
 
 inline const char *kindName(const Request &request) {
@@ -90,6 +97,24 @@ inline int parseHeaders(const std::string &headers, Request &request) {
       std::memcpy(request.sessionId, value.data(), value.size());
       request.sessionId[value.size()] = '\0';
       request.hasSession = true;
+    } else if (key == "x-emote-project-name" && request.kind == Request::Kind::Image) {
+      // Exactly one project-name header per request; the whole matrix of
+      // desktop validation rules applies, but only where the desktop applies it:
+      // the bodyless controls are lifecycle endpoints that skip the header
+      // entirely (receiver.rs:262), so a duplicate or invalid value there is
+      // ignored instead of rejecting the order. A duplicate or invalid value on
+      // an image or on /health is reported through the request result, not here,
+      // so the runtime can answer with its own body and change no state.
+      if (request.hasName) {
+        // A second header rejects the whole request with the same result.
+        request.nameValid = false;
+        request.projectName[0] = '\0';
+      } else {
+        request.hasName = true;
+        request.nameValid =
+            project_name::decode(value.data(), value.size(), request.projectName) ==
+            project_name::Result::Valid;
+      }
     } else if (key == "x-emote-state") {
       // Sender metadata for the clock skin. Missing or unknown values keep
       // the default avatar rendering; no value is rejected here.
@@ -99,6 +124,9 @@ inline int parseHeaders(const std::string &headers, Request &request) {
   }
   if (request.health) return request.length == 0 ? 200 : 400;
   if (!hasLength) return 411;
+  // An invalid project name is the distinct parser result surfaced as 400;
+  // it applies to images and bodyless controls alike and changes no state.
+  if (request.hasName && !request.nameValid) return 400;
   if (request.kind == Request::Kind::Image) {
     if (!request.length) return 400;
     if (!hasType) return 415;

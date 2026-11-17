@@ -27,6 +27,9 @@ class IdleClockTests(unittest.TestCase):
     def test_redraw_pacing_and_forced_source_changes(self): self.run_case("pacing")
     def test_madrid_configuration_and_local_labels(self): self.run_case("labels")
     def test_glyph_pixels_footer_two_walkers_and_clipping(self): self.run_case("pixels")
+    def test_title_phase_alternation_keeps_canonical_rows(self): self.run_case("titlephase")
+    def test_title_truncates_above_sixteen_cells(self): self.run_case("truncation")
+    def test_stale_no_session_restores_and_clears(self): self.run_case("nosession")
 
 
 if __name__ == "__main__":
