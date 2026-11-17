@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 
 // Session-title validation mirroring the desktop receiver matrix
 // (gentle-emote-desktop src/receiver.rs): percent-decode exactly once with
@@ -22,11 +23,25 @@ inline unsigned hexValue(unsigned char c) {
   if (c >= 'a') return c - 'a' + 10;
   return c - 'A' + 10;
 }
-// Unicode White_Space scalars reachable after the control-character rule.
+// Whitespace set of the desktop's JavaScript-style trim: BOM counts, U+0085
+// does not, and the remaining scalars are Unicode White_Space.
 inline bool space(uint32_t cp) {
-  return (cp >= 9 && cp <= 13) || cp == 0x20 || cp == 0x85 || cp == 0xa0 ||
+  return cp == 0xfeff || (cp >= 9 && cp <= 13) || cp == 0x20 || cp == 0xa0 ||
          cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 ||
          cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000;
+}
+
+// Reconstruct one scalar from its UTF-8 bytes. The lead byte must be masked:
+// without it, a multi-byte scalar never equals its code point and every
+// multi-byte whitespace scalar would be judged non-blank.
+inline uint32_t scalarAt(const char *bytes, size_t length) {
+  const unsigned char *p = reinterpret_cast<const unsigned char *>(bytes);
+  if (length == 1) return p[0];
+  if (length == 2) return ((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu);
+  if (length == 3)
+    return ((p[0] & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu);
+  return ((p[0] & 0x07u) << 18) | ((p[1] & 0x3Fu) << 12) |
+         ((p[2] & 0x3Fu) << 6) | (p[3] & 0x3Fu);
 }
 
 // Decode into out (STORE bytes, NUL-terminated) and apply the whole matrix.
@@ -79,38 +94,32 @@ inline Result decode(const char *data, size_t length, char *out) {
   // Blank-after-trim on Unicode whitespace; boundaries fall between scalars.
   size_t start = 0, end = written;
   while (start < end) {
-    uint32_t cp = static_cast<unsigned char>(out[start]);
-    for (size_t k = 1; k < scalarLen[start]; ++k)
-      cp = (cp << 6) | (static_cast<unsigned char>(out[start + k]) & 0x3Fu);
-    if (!space(cp)) break;
+    if (!space(scalarAt(out + start, scalarLen[start]))) break;
     start += scalarLen[start];
   }
   while (end > start) {
     size_t lead = end - 1;
     while (lead > start && (out[lead] & 0xC0) == 0x80) --lead;
-    uint32_t cp = static_cast<unsigned char>(out[lead]);
-    for (size_t k = 1; k < scalarLen[lead]; ++k)
-      cp = (cp << 6) | (static_cast<unsigned char>(out[lead + k]) & 0x3Fu);
-    if (!space(cp)) break;
+    if (!space(scalarAt(out + lead, scalarLen[lead]))) break;
     end = lead;
   }
   if (start == end) return Result::Invalid;
-  // Exactly "." or ".."; control characters, DEL and path separators; and the
-  // 128 UTF-16 unit bound, all on the trimmed value.
-  if (end - start == 1 && out[start] == '.') return Result::Invalid;
-  if (end - start == 2 && out[start] == '.' && out[start + 1] == '.') return Result::Invalid;
+  // Exactly "." or "..", control characters, DEL and path separators, and the
+  // 128 UTF-16 unit bound all apply to the UNTRIMMED name, exactly as
+  // receiver.rs:338-384 does: the trim only decides blankness, so a leading
+  // space survives into the stored title and a leading tab is rejected as a
+  // control character.
+  if (written == 1 && out[0] == '.') return Result::Invalid;
+  if (written == 2 && out[0] == '.' && out[1] == '.') return Result::Invalid;
   int units = 0;
-  for (size_t i = start; i < end;) {
-    uint32_t cp = static_cast<unsigned char>(out[i]);
-    for (size_t k = 1; k < scalarLen[i]; ++k)
-      cp = (cp << 6) | (static_cast<unsigned char>(out[i + k]) & 0x3Fu);
+  for (size_t i = 0; i < written;) {
+    const uint32_t cp = scalarAt(out + i, scalarLen[i]);
     if (cp <= 0x1F || cp == 0x7F || cp == '/' || cp == '\\') return Result::Invalid;
     units += cp >= 0x10000 ? 2 : 1;
     if (units > MAX_UNITS) return Result::Invalid;
     i += scalarLen[i];
   }
-  for (size_t i = 0; i < end - start; ++i) out[i] = out[start + i];
-  out[end - start] = '\0';
+  out[written] = '\0';
   return Result::Valid;
 }
 } // namespace project_name

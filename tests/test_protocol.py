@@ -119,6 +119,24 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(value=value[:40]):
                 self.assertEqual(self.parse(self.headers(b"X-Emote-Project-Name: " + value + b"\r\n")), 400)
 
+    def test_project_name_parity_trims_only_for_blankness(self):
+        # Desktop parity (receiver.rs:338-384): the trim only decides blankness;
+        # the dot, control-character and 128-unit rules and the stored value all
+        # use the untrimmed name. Its JavaScript-style trim counts a BOM and NBSP
+        # as whitespace and does not count U+0085 (kept out of this test because
+        # the runner's line splitting treats U+0085 as a line break).
+        sep = b"\n----\n"
+        raw = (self.headers(b"X-Emote-Project-Name: %20x\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %20.%20\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %09lab\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %EF%BB%BF\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %C2%A0\r\n") + sep
+               + self.headers(b"X-Emote-Project-Name: %C2%A1\r\n"))
+        self.assertEqual(self.store(raw),
+                         ["200  x", "200  . ", "400  .  invalid-name", "400  .  invalid-name",
+                          "400  .  invalid-name", "200 \u00a1"],
+                         "spaces survive, a leading tab is a control character, a BOM-only or NBSP-only name is blank, a non-ASCII name is kept")
+
     def test_project_name_duplicate_header_rejects(self):
         # A second X-Emote-Project-Name header rejects the whole image request.
         # Bodyless controls are lifecycle endpoints: the desktop receiver skips
