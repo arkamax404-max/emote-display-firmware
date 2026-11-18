@@ -20,8 +20,12 @@ int main() {
   firmware::drawVersion(display, "READY", "SEND PNG");
   const std::vector<std::string> expected = {
       "size:1", "color:" + std::to_string(panel::color(display.color565(128, 128, 128))),
-      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.1.0"};
+      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.2.0-dbg"};
   assert(display.calls == expected);
+  // Debug identity is 10 ASCII cells; setTextSize(1) renders 6 px per
+  // cell, so the footer at x=2 must still fit the 64 px panel width.
+  assert(std::strlen(firmware::VERSION) == 10);
+  assert(2 + 10 * 6 <= panel::SIZE);
   assert(44 + panel::TOP_OFFSET + 8 <= panel::SIZE);
   for (const auto &message : std::vector<std::pair<const char *, const char *>>{
            {"SET WIFI", "VIA USB"}, {"WIFI", "CONNECT"}, {"", ""},

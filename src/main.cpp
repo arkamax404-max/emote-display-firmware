@@ -11,6 +11,10 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "receiver_protocol.h"
+#include "serial_protocol.h"
+#include "serial_ingress.h"
+#include "image_ingress.h"
+#include "diagnostic_status.h"
 #include "idle_clock_image.h"
 #include "firmware_version.h"
 
@@ -48,13 +52,43 @@ static SenderConnection senderConnection;
 static uint32_t senderIp = 0;
 static idle_clock::State clockState;
 static bool clockConfigured = false;
+// T7: serial RX diagnostic indicator state (shared with the host tests).
+static diag::Status serialDiag;
+static void resetOrientationReference();
+// USB serial ingress (T2): a dedicated static payload buffer — the shared
+// HTTP buffer is never touched by serial traffic — plus the parser, the
+// binary-session multiplexer and the extracted provisioning console.
+static uint8_t serialPng[receiver::MAX_PNG];
+static serial::Parser serialParser(serialPng, receiver::MAX_PNG);
+static serial::Mux serialMux(serialParser);
+static serial::ProvisionConsole provisionConsole({
+    [](const char *line) { Serial.println(line); },
+    []() { Serial.flush(); },
+    [](const char *ssid, const char *password) {
+      bool saved = false;
+      if (preferences.begin("gentle", false)) {
+        preferences.putString("password", password);
+        preferences.putString("ssid", ssid);
+        // putString returns zero for an empty password even on success.
+        saved = preferences.isKey("password") && preferences.getString("password") == password &&
+                preferences.getString("ssid") == ssid;
+        preferences.end();
+      }
+      return saved;
+    },
+    []() { resetOrientationReference(); },
+    []() { delay(100); ESP.restart(); },
+});
+// At most one bounded reply is pending (stop-and-wait): no application queue.
+static uint8_t serialReply[serial::REPLY_SIZE];
+static size_t replyPending = 0, replySent = 0;
 
 static bool readClock(std::tm &calendar, std::time_t &epoch) {
   epoch = std::time(nullptr);
   return localtime_r(&epoch, &calendar) && calendar.tm_year > 116;
 }
 
-static void renderDisplay() {
+static void renderContent() {
   std::tm calendar = {};
   std::time_t epoch = 0;
   const auto source = clockState.source(millis(), readClock(calendar, epoch), hasFrame, wifiInfo.visible());
@@ -73,7 +107,6 @@ static void renderDisplay() {
       matrix.setCursor(2, panel::TOP_OFFSET + row * 8);
       matrix.print(lines[row].c_str());
     }
-    matrix.show();
     return;
   }
   if (source == idle_clock::Source::Clock) {
@@ -92,7 +125,6 @@ static void renderDisplay() {
                      [](int x, int y, uint16_t color) {
       matrix.drawPixel(x, y, panel::color(color));
     });
-    matrix.show();
     return;
   }
   if (!hasFrame) {
@@ -104,7 +136,6 @@ static void renderDisplay() {
     matrix.setCursor(2, 28 + panel::TOP_OFFSET);
     matrix.print(messageSecond);
     firmware::drawVersion(matrix, messageFirst, messageSecond);
-    matrix.show();
     return;
   }
   // Avatar frames now use all 64 rows at y0 without a top margin or crop.
@@ -115,6 +146,16 @@ static void renderDisplay() {
   for (int y = 0; y < rows; ++y) for (int x = 0; x < 64; ++x) {
     matrix.drawPixel(x, y + offset, panel::color(lastFrame[y * 64 + x]));
   }
+}
+
+// Single present wrapper (T7): every content path renders through
+// renderContent(), then the diagnostic overlay is drawn LAST — after any
+// avatar/clock/message/info content, so a newly presented frame can never
+// erase the indicator — and one show() flushes both.
+static void presentDisplay() {
+  renderContent();
+  serialDiag.draw(matrix);
+  serialDiag.clearDirty();
   matrix.show();
 }
 
@@ -123,26 +164,35 @@ static void pollClock() {
   std::time_t epoch = 0;
   const uint32_t now = millis();
   const auto source = clockState.source(now, readClock(calendar, epoch), hasFrame, wifiInfo.visible());
-  if (clockState.redrawDue(now, source)) renderDisplay();
+  if (clockState.redrawDue(now, source)) presentDisplay();
 }
 
 static void displayMessage(const char *first, const char *second) {
   messageFirst = first;
   messageSecond = second;
   hasFrame = false;
-  renderDisplay();
+  presentDisplay();
 }
 
-static bool showPng() {
-  const bool decoded = frameDecoder.decode(pngBytes, received);
+// Decode-and-stage half of the shared presentation: on success the staged
+// frame becomes the displayed content on the next present; on failure no
+// staged state changes, so an invalid PNG cannot corrupt later redraws or
+// alter the persisted frame classification.
+static bool stagePng(uint8_t *data, size_t length, bool clockSkin) {
+  const bool decoded = frameDecoder.decode(data, length);
   clockState.pngResult(decoded, millis());
   if (!decoded) return false;
-  // Separate from decode staging so invalid PNGs cannot corrupt later redraws
-  // or alter the persisted frame classification.
   memcpy(lastFrame, frameDecoder.pixels(), sizeof(lastFrame));
-  frameIsClock = request.clockState;
+  frameIsClock = clockSkin;
   hasFrame = true;
-  renderDisplay();
+  return true;
+}
+
+// Presentation shared by HTTP and serial ingress: decode+stage, one present
+// (content plus diagnostic overlay), then the frame counter.
+static bool showPng(uint8_t *data, size_t length, bool clockSkin) {
+  if (!stagePng(data, length, clockSkin)) return false;
+  presentDisplay();
   ++accepted;
   return true;
 }
@@ -153,7 +203,7 @@ static void resetOrientationReference() {
     preferences.remove("updir");
     preferences.end();
   }
-  renderDisplay();
+  presentDisplay();
   Serial.println("ORIENT: hold panel upright and still to calibrate");
 }
 
@@ -173,7 +223,7 @@ static void pollOrientation() {
     Serial.println("ORIENT: upright reference saved");
   }
   if (changed) {
-    renderDisplay(); // Works without receiving another HTTP frame.
+    presentDisplay(); // Works without receiving another HTTP frame.
     Serial.printf("ORIENT: rotation %u degrees\n", orientation.rotation() * 90);
   }
 }
@@ -184,7 +234,7 @@ static void pollWifiInfoButton() {
   const bool changed = wifiInfo.update(digitalRead(PIN_BUTTON_UP) == LOW, now, senderStats.size());
   if (changed || (wifiInfo.visible() && uint32_t(now - lastRefresh) >= 1000)) {
     lastRefresh = now;
-    renderDisplay();
+    presentDisplay();
   }
 }
 
@@ -248,7 +298,11 @@ static void pollHttp() {
             // disclosed. remainingMs also evaluates expiry at this moment.
             ",\"sessionOwnership\":true,\"ownershipActive\":" +
             (sessionOwner.active() ? "true" : "false") +
-            ",\"ownershipRemainingMs\":" + String(sessionOwner.remainingMs(millis())) + "}"); return;
+            ",\"ownershipRemainingMs\":" + String(sessionOwner.remainingMs(millis())) +
+            // Additive T7 diagnostic counters (saturating uint32).
+            ",\"serialRxImages\":" + String(serialDiag.imageCount()) +
+            ",\"serialRxControls\":" + String(serialDiag.controlCount()) +
+            ",\"serialRxRejected\":" + String(serialDiag.rejectedCount()) + "}"); return;
       }
       if (request.kind != receiver::Request::Kind::Image) {
         // Session controls: claim/heartbeat/release. They never touch the
@@ -287,7 +341,7 @@ static void pollHttp() {
           reply(409, "{\"error\":\"owned by another session\"}");
           return;
         }
-        if (showPng()) {
+        if (showPng(pngBytes, received, request.clockState)) {
           // Lease renewal only for a valid owned PNG after successful
           // presentation; ownerless images (legacy behavior) never claim.
           // The session title commits only here, after the ownership
@@ -306,51 +360,123 @@ static void pollHttp() {
   if (!client.connected() && !client.available()) closeRequest();
 }
 
-// USB provisioning: WIFI, SSID and password, one line each. Never echo secrets.
+// USB provisioning: WIFI, SSID and password, one line each. Never echo
+// secrets. While the binary serial session is open every byte goes to the
+// frame parser instead — a frame or its tail is never parsed as
+// WIFI/ORIENT/password, and console lines keep their exact previous protocol
+// (including credentials that start with the frame magic).
+static void pollSerialFrames();
 static void pollProvisioning() {
-  static String line, pendingSsid;
-  static int stage = 0;
-  static bool overflow = false;
-  static uint32_t started = 0;
-  if (stage && millis() - started > 60000) { stage = 0; line = ""; pendingSsid = ""; overflow = false; }
+  if (serialMux.mode() == serial::Mux::Mode::Binary) {
+    pollSerialFrames();
+    return;
+  }
+  provisionConsole.tick(millis());
   for (int budget = 0; budget < 128 && Serial.available(); ++budget) {
-    const char c = Serial.read();
-    if (c == '\r') continue;
-    if (c != '\n') {
-      if (line.length() < 64) line += c;
-      else overflow = true;
-      continue;
+    const int value = Serial.read();
+    if (value < 0) break;
+    const uint32_t now = millis();
+    serialDiag.onByte(now); // even console bytes start the pending-RX window
+    if (provisionConsole.feed(static_cast<char>(value), now) ==
+        serial::ProvisionConsole::Event::EnterBinary) {
+      serialMux.enter(now);
+      serialDiag.onBinaryEnter(now); // handshake is never an accepted operation
+      // The rest of the buffered input belongs to the binary session: route
+      // it immediately instead of finishing the console loop, which would
+      // coerce frame bytes into provisioning lines.
+      pollSerialFrames();
+      return;
     }
-    if (overflow) {
-      Serial.println("WIFI_ERROR: line too long");
-      stage = 0; pendingSsid = "";
-    } else if (stage == 0 && line == "ORIENT") {
-      resetOrientationReference();
-    } else if (stage == 0 && line == "WIFI") {
-      stage = 1; started = millis(); Serial.println("WIFI_SSID");
-    } else if (stage == 1) {
-      if (line.length() == 0 || line.length() > 32) { stage = 0; Serial.println("WIFI_ERROR: invalid SSID length"); }
-      else { pendingSsid = line; stage = 2; Serial.println("WIFI_PASSWORD"); }
-    } else if (stage == 2) {
-      if (line.length() > 63 || (line.length() != 0 && line.length() < 8)) {
-        Serial.println("WIFI_ERROR: invalid password length"); stage = 0; pendingSsid = "";
+  }
+}
+
+// Bounded nonblocking reply TX: at most one 12-byte reply is pending, flushed
+// in availableForWrite()-limited chunks so a host that stopped reading can
+// never block the cooperative loop.
+static void flushSerialReply() {
+  while (replySent < replyPending) {
+    const int room = Serial.availableForWrite();
+    if (room <= 0) return;
+    const size_t take = static_cast<size_t>(room) < replyPending - replySent
+                            ? static_cast<size_t>(room)
+                            : replyPending - replySent;
+    const size_t written = Serial.write(serialReply + replySent, take);
+    if (written == 0) return;
+    replySent += written;
+  }
+  replyPending = 0;
+}
+
+static void queueSerialReply(uint16_t requestId, serial::Code code) {
+  serial::encodeReply(serialReply, requestId, code);
+  replySent = 0;
+  replyPending = serial::REPLY_SIZE;
+  flushSerialReply();
+}
+
+// One frame handling pass, identical admission/commit rules as pollHttp: the
+// frame is fully received and CRC-validated before the ownership decision;
+// the reply is queued only after the accepted presentation; a rejected frame
+// changes no state at all. USB frames never touch the sender IP stats.
+static void handleSerialFrame() {
+  const serial::Frame frame = serialParser.frame();
+  const uint32_t now = millis();
+  serial::Code code;
+  if (frame.op == serial::Op::Image) {
+    code = image_ingress::admitImage(frame, sessionOwner, now);
+    if (code == serial::Code::Ok) {
+      if (stagePng(serialPng, frame.payloadLength, frame.clockState)) {
+        // Green is set BEFORE the single present, so the accepted frame
+        // shows the green overlay immediately — never amber-then-green.
+        serialDiag.onImageAccepted(now);
+        image_ingress::commitImage(sessionOwner, clockState, frame, now);
+        presentDisplay();
       } else {
-        bool saved = false;
-        if (preferences.begin("gentle", false)) {
-          preferences.putString("password", line);
-          preferences.putString("ssid", pendingSsid);
-          // putString returns zero for an empty password even on success.
-          saved = preferences.isKey("password") && preferences.getString("password") == line &&
-                  preferences.getString("ssid") == pendingSsid;
-          preferences.end();
-        }
-        line = ""; pendingSsid = ""; stage = 0;
-        Serial.println(saved ? "WIFI_SAVED" : "WIFI_ERROR: storage failed");
-        Serial.flush();
-        if (saved) { delay(100); ESP.restart(); }
+        code = serial::Code::Png;
+        serialDiag.onRejected(now);
       }
+    } else {
+      serialDiag.onRejected(now); // admission rejection, state untouched
     }
-    line = ""; overflow = false;
+  } else {
+    code = image_ingress::admitControl(frame, sessionOwner, clockState, now);
+    if (code == serial::Code::Ok) {
+      serialDiag.onControlAccepted(now);
+    } else {
+      serialDiag.onRejected(now);
+    }
+  }
+  queueSerialReply(frame.requestId, code);
+}
+
+static void pollSerialFrames() {
+  const uint32_t now = millis();
+  serialMux.update(now); // discard stalled frames, session stays binary
+  flushSerialReply();
+  for (int budget = 0; budget < 256 && Serial.available(); ++budget) {
+    const int value = Serial.read();
+    if (value < 0) break;
+    serialDiag.onByte(now);
+    const serial::Mux::Routed routed =
+        serialMux.feed(static_cast<uint8_t>(value), now);
+    switch (routed.event) {
+      case serial::Mux::Event::Complete:
+        handleSerialFrame();
+        break;
+      case serial::Mux::Event::Error:
+        queueSerialReply(serialParser.lastRequestId(), serialParser.error());
+        serialDiag.onRejected(now);
+        break;
+      case serial::Mux::Event::RepeatEntry:
+        Serial.println(serial::ENTRY_ACK);
+        break;
+      case serial::Mux::Event::Exit:
+        Serial.println(serial::EXIT_ACK);
+        serialDiag.onBinaryExit(now);
+        return;
+      default:
+        break; // frame bytes never reach the console
+    }
   }
 }
 
@@ -427,5 +553,8 @@ void loop() {
   // Lease expiry is also evaluated before every ownership decision; this
   // loop-level check keeps an abandoned reservation from outliving silence.
   sessionOwner.expire(millis());
+  // One batched diagnostic pass per loop: timeout/hold transitions and any
+  // signal change not already drawn this loop get exactly one redraw.
+  if (serialDiag.update(millis())) presentDisplay();
   delay(1);
 }
