@@ -17,6 +17,17 @@
 #include "diagnostic_status.h"
 #include "idle_clock_image.h"
 #include "firmware_version.h"
+#include "portal_policy.h"
+#include "portal_page.h"
+#include <DNSServer.h>
+#include <esp_system.h>
+
+// TI USB gate: a USB HOST is enumerated by the bus — what S1 asks for — not
+// Serial's operator bool(), which only turns true with DTR+RTS asserted and
+// would therefore claim a charger or a closed terminal is a computer.
+// Declared here instead of pulling the full TinyUSB headers for one banner
+// call; the symbol ships with the core's TinyUSB CDC support.
+extern "C" bool tud_mounted(void);
 
 static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
@@ -46,6 +57,74 @@ static bool readingBody = false;
 static uint32_t requestStarted = 0;
 static bool listening = false;
 static String ssid, password;
+
+// WiFi captive portal fallback (T2-T4). The portal owns its own server,
+// client and DNS responder while open; the station server below is mutually
+// exclusive with it — pollWifi() returns while portalActive and the portal
+// server is begun only while !listening, so port 80 and the two serving
+// loops can never run at the same time.
+static WiFiServer portalServer(80);
+static WiFiClient portalClient;
+static DNSServer dnsServer;
+static bool portalActive = false;
+enum class PortalPhase : uint8_t { Portal, Validating };
+static PortalPhase portalPhase = PortalPhase::Portal;
+static uint32_t validationStarted = 0;
+// Portal HTTP request state: entirely separate from the station server's
+// client/headers/request so neither serving loop can corrupt the other.
+static std::string portalRequest;
+static size_t portalHeaderEnd = 0;
+static size_t portalContentLength = 0;
+static uint32_t portalRequestStarted = 0;
+// Boot-only retry schedule (S2): 4 x 10 s attempts, 5 s pauses; once the
+// boot phase is over a later link loss keeps the runtime reconnect loop and
+// never opens the portal.
+static portal::BootRetry bootRetry;
+static bool bootPhase = false;
+// The offered home-network credentials read from POST /save. Never logged,
+// echoed or displayed anywhere; zeroed as soon as the validation attempt
+// concludes, whatever its outcome.
+static char offeredSsid[33];
+static char offeredPassword[portal::AP_PASSWORD_MAX + 1];
+// The generated AP password (S3): intended to be read off the panel. It
+// never reaches the HTML, the serial log, /health or NVS.
+static char apPassword[portal::AP_PASSWORD_LEN + 1];
+static std::string portalError; // last save failure, shown until reboot
+// Portal panel slides (T4), through the existing displayMessage path only:
+// the AP label with the password, the PORTAL banner with the setup hint and
+// the AP address. The wider phase-3 strings keep the 10-char line budget by
+// splitting the IP across both lines, exactly like the Wi-Fi info overlay.
+static uint8_t portalSlide = 0;
+static uint32_t slideSince = 0;
+static void showPortalSlide();
+static void pollPortal();
+
+// Credential storage shared by USB provisioning and the portal (S4): same
+// namespace, same keys, same read-back verification. putString returns zero
+// for an empty password even on success, hence the isKey guard. A partial
+// write is rolled back: S4 promises the stored credentials stay untouched,
+// so a failed save must not leave a mixed old/new pair behind.
+static bool storeCredentials(const char *newSsid, const char *newPassword) {
+  bool saved = false;
+  if (preferences.begin("gentle", false)) {
+    const bool hadSsid = preferences.isKey("ssid");
+    const bool hadPassword = preferences.isKey("password");
+    const String previousSsid = preferences.getString("ssid", "");
+    const String previousPassword = preferences.getString("password", "");
+    preferences.putString("password", newPassword);
+    preferences.putString("ssid", newSsid);
+    saved = preferences.isKey("password") && preferences.getString("password") == newPassword &&
+            preferences.getString("ssid") == newSsid;
+    if (!saved) {
+      if (hadPassword) preferences.putString("password", previousPassword);
+      else preferences.remove("password");
+      if (hadSsid) preferences.putString("ssid", previousSsid);
+      else preferences.remove("ssid");
+    }
+    preferences.end();
+  }
+  return saved;
+}
 static WifiInfoOverlay wifiInfo;
 static SenderStats senderStats;
 static SenderConnection senderConnection;
@@ -64,17 +143,8 @@ static serial::Mux serialMux(serialParser);
 static serial::ProvisionConsole provisionConsole({
     [](const char *line) { Serial.println(line); },
     []() { Serial.flush(); },
-    [](const char *ssid, const char *password) {
-      bool saved = false;
-      if (preferences.begin("gentle", false)) {
-        preferences.putString("password", password);
-        preferences.putString("ssid", ssid);
-        // putString returns zero for an empty password even on success.
-        saved = preferences.isKey("password") && preferences.getString("password") == password &&
-                preferences.getString("ssid") == ssid;
-        preferences.end();
-      }
-      return saved;
+    [](const char *newSsid, const char *newPassword) {
+      return storeCredentials(newSsid, newPassword);
     },
     []() { resetOrientationReference(); },
     []() { delay(100); ESP.restart(); },
@@ -160,6 +230,10 @@ static void presentDisplay() {
 }
 
 static void pollClock() {
+  // While the portal is open its message stays pinned: a surviving powered
+  // RTC (soft restart without Wi-Fi) would otherwise pull the autonomous
+  // clock back onto the panel and hide the SSID/password slides.
+  if (portalActive) return;
   std::tm calendar = {};
   std::time_t epoch = 0;
   const uint32_t now = millis();
@@ -172,6 +246,262 @@ static void displayMessage(const char *first, const char *second) {
   messageSecond = second;
   hasFrame = false;
   presentDisplay();
+}
+
+// ------------------------------------------------------------------------
+// WiFi captive portal (T2, T3). Everything below runs only while
+// portalActive; the station server state (server/client/headers/request)
+// is never touched from here.
+// ------------------------------------------------------------------------
+static void zeroOffered() {
+  // The passphrase offered through the form must not outlive the attempt:
+  // zero both buffers whatever the validation outcome was.
+  memset(offeredSsid, 0, sizeof(offeredSsid));
+  memset(offeredPassword, 0, sizeof(offeredPassword));
+}
+
+// std::string::clear() drops the size but leaves the bytes in the heap:
+// the raw form body (and the passphrase in it) would survive there, so
+// overwrite it deliberately before releasing the buffer.
+static void wipeRequestBuffer() {
+  if (!portalRequest.empty()) {
+    volatile char *bytes = &portalRequest[0];
+    for (size_t i = 0; i < portalRequest.size(); ++i) bytes[i] = 0;
+  }
+  portalRequest.clear();
+  portalHeaderEnd = 0;
+  portalContentLength = 0;
+}
+
+static void showPortalSlide() {
+  if (portalSlide == 0) displayMessage("AP: GENTLE", apPassword);
+  else if (portalSlide == 1) displayMessage("PORTAL", "WIFI SETUP");
+  else displayMessage("192.168.", "4.1");
+}
+
+// Opens the WPA2 portal (S1, S3): random 8-character AP password (WPA2 PSK
+// minimum) drawn once via esp_random() — never stored, so a fresh one every
+// boot and nothing secret is added to NVS — shown on the panel so anyone
+// standing at the board can join; never logged, echoed or exposed in
+// /health. The decision was taken once at the gate (setup boot gate or the
+// exhausted retry); an USB host appearing later does not cancel it.
+static void openPortal() {
+  portal::generateApPassword(apPassword, []() { return esp_random(); });
+  // WPA2 (S3 correction): the password argument switches softAP to
+  // WPA2_PSK; never an open AP.
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(portal::AP_SSID, apPassword, portal::AP_CHANNEL, 0,
+              portal::AP_MAX_CLIENTS);
+  // Wildcard answer with the AP address so the OS captive-portal detection
+  // fires on every probe.
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  if (!listening) portalServer.begin(); // never while the station server is up
+  portalActive = true;
+  portalPhase = PortalPhase::Portal;
+  portalSlide = 0;
+  slideSince = millis();
+  showPortalSlide();
+  Serial.println("Portal open: join gentle-matrix and open http://192.168.4.1");
+  Serial.println("The AP password is shown on the panel (not printed here).");
+}
+
+static void portalReply(int code, const char *contentType, const std::string &body) {
+  portalClient.printf("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %u\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+                      code, code == 200 ? "OK" : "Error", contentType,
+                      static_cast<unsigned>(body.size()));
+  portalClient.print(body.c_str());
+  portalClient.stop();
+  wipeRequestBuffer();
+}
+
+// Bounded Content-Length extraction from the accumulated portal headers.
+static long parsePortalContentLength(const std::string &requestHeaders) {
+  std::string lower;
+  for (const char c : requestHeaders)
+    lower.push_back(static_cast<char>(tolower(static_cast<unsigned char>(c))));
+  const size_t key = lower.find("content-length:");
+  if (key == std::string::npos) return -1;
+  const size_t valueStart = requestHeaders.find_first_not_of(" \t", key + 15);
+  if (valueStart == std::string::npos) return -1;
+  const size_t valueEnd = requestHeaders.find('\r', valueStart);
+  if (valueEnd == std::string::npos) return -1;
+  const std::string digits = requestHeaders.substr(valueStart, valueEnd - valueStart);
+  if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos) return -1;
+  return strtol(digits.c_str(), nullptr, 10);
+}
+
+// S4 validation conclusion: success persists (same read-back verification as
+// the serial hook), replies and restarts; failure returns to AP-only, keeps
+// the stored credentials untouched, zeros the offered buffers and re-renders
+// the page with the error.
+static void concludePortalValidation(bool connected) {
+  portalPhase = PortalPhase::Portal;
+  if (portal::concludeValidation(connected) == portal::Outcome::SaveAndReboot) {
+    displayMessage("WIFI", "SAVING");
+    const bool saved = storeCredentials(offeredSsid, offeredPassword);
+    zeroOffered();
+    if (saved) {
+      portalReply(200, "text/html; charset=utf-8", portal_page::savedPage());
+      delay(100); // let the small success page drain, exactly like USB provisioning
+      ESP.restart();
+    }
+    portalError = "Storage failed. Try again.";
+    portalReply(500, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_AP); // back to AP-only
+  zeroOffered();
+  portalError = "Could not connect to that network. Check the name and password, then try again.";
+  portalSlide = 0;
+  showPortalSlide();
+  portalReply(200, "text/html; charset=utf-8", portal_page::formPage(portalError));
+}
+
+// POST /save with a reviewed body: no reply to the client here — validation
+// runs asynchronously up to portal::VALIDATION_MS and concludePortalValidation
+// answers the same open client.
+static void beginPortalValidation(const char *body, size_t length) {
+  const portal::FormFields fields = portal::parseForm(body, length);
+  if (!fields.ok) {
+    portalError = "Malformed form data.";
+    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  const portal::CredError review = portal::reviewCredentials(fields.ssid, fields.password);
+  if (review != portal::CredError::Ok) {
+    portalError = portal::credErrorText(review);
+    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  strncpy(offeredSsid, fields.ssid.c_str(), sizeof(offeredSsid) - 1);
+  strncpy(offeredPassword, fields.password.c_str(), sizeof(offeredPassword) - 1);
+  wipeRequestBuffer(); // the raw body must not linger while we validate
+  // S4: try the real network before persisting anything. The AP stays up
+  // during AP_STA validation so the phone's connection and the DNS responder
+  // both survive.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(offeredSsid, offeredPassword);
+  portalPhase = PortalPhase::Validating;
+  validationStarted = millis();
+  displayMessage("TRY WIFI", "CHECK");
+}
+
+static void dispatchPortalRequest() {
+  const size_t firstLineEnd = portalRequest.find("\r\n");
+  const portal::RequestLine line =
+      portal::parseRequestLine(portalRequest.substr(0, firstLineEnd));
+  if (!line.ok) {
+    portalError = "Unsupported request.";
+    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  if (!line.isPost) {
+    if (line.path == "/health") {
+      // Portal identity for the diagnostics surface (T4). The generated AP
+      // password is never part of it.
+      const std::string health = std::string("{\"ok\":true,\"portal\":true,\"apSsid\":\"") +
+                                 portal::AP_SSID + "\",\"validation\":" +
+                                 (portalPhase == PortalPhase::Validating ? "true}" : "false}");
+      portalReply(200, "application/json", health);
+      return;
+    }
+    // GET any path returns the form page, so OS probe URLs land on it.
+    portalReply(200, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  if (line.path != "/save") {
+    portalReply(405, "text/html; charset=utf-8",
+                portal_page::formPage("Unsupported method or path."));
+    return;
+  }
+  if (portalPhase == PortalPhase::Validating) {
+    portalReply(503, "text/html; charset=utf-8",
+                portal_page::formPage("Already validating. Wait a moment."));
+    return;
+  }
+  beginPortalValidation(portalRequest.data() + portalHeaderEnd,
+                        portalRequest.size() - portalHeaderEnd);
+}
+
+// The portal's cooperative loop: DNS responder plus one bounded request at a
+// time (same 2.5 s timeout policy as the station server). The offered
+// credentials stay intact while validating; the panel keeps the TRY WIFI
+// slide until the conclusion.
+static void pollPortal() {
+  if (!portalActive) return;
+  const uint32_t now = millis();
+  if (uint32_t(now - slideSince) >= 5000) {
+    slideSince = now;
+    portalSlide = static_cast<uint8_t>((portalSlide + 1) % 3);
+    showPortalSlide();
+  }
+  dnsServer.processNextRequest();
+  if (portalPhase == PortalPhase::Validating) {
+    if (WiFi.status() == WL_CONNECTED) {
+      concludePortalValidation(true);
+      return;
+    }
+    if (uint32_t(now - validationStarted) >= portal::VALIDATION_MS) {
+      concludePortalValidation(false);
+      return;
+    }
+  }
+  if (!portalClient) {
+    portalClient = portalServer.available();
+    if (!portalClient) return;
+    wipeRequestBuffer(); // also overwrites any bytes left by the last request
+    portalRequestStarted = now;
+    portalClient.setTimeout(1); // seconds, not milliseconds
+  }
+  if (uint32_t(now - portalRequestStarted) > REQUEST_TIMEOUT_MS) {
+    portalError = "Request timed out.";
+    portalReply(408, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    return;
+  }
+  for (size_t budget = 0; budget < 1024 && portalClient.available(); ++budget) {
+    const int value = portalClient.read();
+    if (value < 0) break;
+    portalRequest.push_back(static_cast<char>(value));
+    if (portalHeaderEnd == 0) {
+      const size_t end = portalRequest.find("\r\n\r\n");
+      if (end == std::string::npos) {
+        if (portalRequest.size() > 4096) {
+          portalError = "Request too large.";
+          portalReply(431, "text/html; charset=utf-8", portal_page::formPage(portalError));
+          return;
+        }
+        continue;
+      }
+      portalHeaderEnd = end + 4;
+      // Only a POST carries a body. Browsers and OS captive-portal probes
+      // send a body-less GET (no Content-Length at all), so requiring the
+      // header there would answer 411 and leave the portal unreachable.
+      const portal::RequestLine head = portal::parseRequestLine(
+          portalRequest.substr(0, portalRequest.find("\r\n")));
+      if (head.ok && !head.isPost) {
+        portalContentLength = 0;
+        dispatchPortalRequest();
+        return;
+      }
+      const long contentLength = parsePortalContentLength(portalRequest.substr(0, portalHeaderEnd));
+      if (contentLength < 0) {
+        portalError = "Missing content length.";
+        portalReply(411, "text/html; charset=utf-8", portal_page::formPage(portalError));
+        return;
+      }
+      if (contentLength > 255) { // ssid + password bound, with margin
+        portalError = "Form data too large.";
+        portalReply(413, "text/html; charset=utf-8", portal_page::formPage(portalError));
+        return;
+      }
+      portalContentLength = static_cast<size_t>(contentLength);
+    } else if (portalRequest.size() >= portalHeaderEnd + portalContentLength) {
+      dispatchPortalRequest();
+      return;
+    }
+  }
+  if (!portalClient.connected() && !portalClient.available()) portalClient.stop();
 }
 
 // Decode-and-stage half of the shared presentation: on success the staged
@@ -302,7 +632,10 @@ static void pollHttp() {
             // Additive T7 diagnostic counters (saturating uint32).
             ",\"serialRxImages\":" + String(serialDiag.imageCount()) +
             ",\"serialRxControls\":" + String(serialDiag.controlCount()) +
-            ",\"serialRxRejected\":" + String(serialDiag.rejectedCount()) + "}"); return;
+            ",\"serialRxRejected\":" + String(serialDiag.rejectedCount()) +
+            // Additive T4 portal identity field: the portal serves its own
+            // health with "portal":true; nothing secret is ever included.
+            ",\"portal\":false}"); return;
       }
       if (request.kind != receiver::Request::Kind::Image) {
         // Session controls: claim/heartbeat/release. They never touch the
@@ -482,12 +815,40 @@ static void pollSerialFrames() {
 
 static void pollWifi() {
   static uint32_t lastRetry = 0;
+  // While the portal is open it owns port 80 and the serving loop; the
+  // station server is never begun in the same window.
+  if (portalActive) return;
   if (ssid.isEmpty()) return;
   if (WiFi.status() != WL_CONNECTED) {
     if (listening) { closeRequest(); server.end(); MDNS.end(); listening = false; }
+    if (bootPhase) {
+      // S2 boot-only bounded schedule; the runtime 15 s loop below is for
+      // everything after boot and never opens the portal.
+      switch (bootRetry.update(millis(), false)) {
+        case portal::BootRetry::Tick::Retry:
+          WiFi.reconnect();
+          break;
+        case portal::BootRetry::Tick::Exhausted:
+          bootPhase = false;
+          // The gate is evaluated once, now (decide → portal) or at the
+          // missing-credentials boot point; USB presence decides.
+          if (portal::decide(tud_mounted(), true, true) ==
+              portal::Decision::OpenPortal) {
+            openPortal();
+            return;
+          }
+          // USB host enumerated: provisioning stays authoritative, the
+          // runtime retry loop continues.
+          break;
+        case portal::BootRetry::Tick::Wait:
+          break;
+      }
+      return;
+    }
     if (millis() - lastRetry >= 15000) { lastRetry = millis(); WiFi.reconnect(); }
     return;
   }
+  bootPhase = false; // first connection success ends the boot countdown
   if (!listening) {
     if (!clockConfigured) {
       configTzTime(idle_clock::TIMEZONE, "pool.ntp.org", "time.cloudflare.com");
@@ -534,13 +895,24 @@ void setup() {
   tzset(); // Also use Madrid if the powered RTC survives an offline soft restart.
   WiFi.setHostname("gentle-matrix");
   if (ssid.isEmpty()) {
-    displayMessage("SET WIFI", "VIA USB");
-    Serial.println("No Wi-Fi credentials. Run scripts/provision_wifi.py via USB.");
+    // Missing credentials: no attempts to exhaust. With a USB host
+    // enumerated the cable path stays authoritative; without one the portal
+    // opens immediately (S1 + missing-credentials decision).
+    if (tud_mounted()) {
+      displayMessage("SET WIFI", "VIA USB");
+      Serial.println("No Wi-Fi credentials. Run scripts/provision_wifi.py via USB.");
+    } else {
+      Serial.println("No Wi-Fi credentials and no USB host: opening the portal.");
+      openPortal();
+    }
   } else {
     displayMessage("WIFI", "CONNECT");
     WiFi.setAutoReconnect(true);
     WiFi.begin(ssid.c_str(), password.c_str());
     password = "";
+    // The setup Wi-Fi.begin counts as attempt one of the boot schedule.
+    bootRetry.start(millis());
+    bootPhase = true;
   }
 }
 
@@ -549,6 +921,7 @@ void loop() {
   pollOrientation();
   pollWifiInfoButton();
   pollWifi();
+  pollPortal();
   pollClock();
   // Lease expiry is also evaluated before every ownership decision; this
   // loop-level check keeps an abandoned reservation from outliving silence.
