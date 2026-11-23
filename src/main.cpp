@@ -385,6 +385,15 @@ static std::string renderPortalForm(const std::string &error) {
   return portal_page::formPage(error, portalFormToken, scanVisibleNetworks());
 }
 
+// A request that could not prove it holds the session token must not receive
+// it back: otherwise anyone able to POST a malformed or tokenless body could
+// read the live token from the error page. The served form carries no token,
+// so the client reloads to get one.
+static std::string renderPortalFormUnverified(const std::string &error) {
+  if (portalPhase == PortalPhase::Validating) return portal_page::formPage(error);
+  return portal_page::formPage(error, "", scanVisibleNetworks());
+}
+
 static void showPortalSlide() {
   if (portalSlide == 0) displayMessage("AP: GENTLE", apPassword);
   else if (portalSlide == 1) displayMessage("PORTAL", "WIFI SETUP");
@@ -483,14 +492,17 @@ static void concludePortalValidation(bool connected) {
 // answers the same open client.
 static void beginPortalValidation(const char *body, size_t length) {
   const portal::FormFields fields = portal::parseForm(body, length);
+  // Neither branch below may echo the session token: a request that cannot
+  // prove it holds the token must not be able to read it back from the error
+  // page. Both answer with a tokenless form that the client re-fetches.
   if (!fields.ok) {
-    portalError = "Malformed form data.";
-    portalReply(400, "text/html; charset=utf-8", renderPortalForm(portalError));
+    portalError = "Malformed form data. Reload the page and try again.";
+    portalReply(400, "text/html; charset=utf-8", renderPortalFormUnverified(portalError));
     return;
   }
   if (!portal::tokenMatches(portalFormToken, fields.token)) {
     portalError = "Invalid or missing form token. Reload the page and try again.";
-    portalReply(403, "text/html; charset=utf-8", renderPortalForm(portalError));
+    portalReply(403, "text/html; charset=utf-8", renderPortalFormUnverified(portalError));
     return;
   }
   const portal::CredError review = portal::reviewCredentials(fields.ssid, fields.password);

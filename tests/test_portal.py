@@ -516,6 +516,23 @@ class MainWiringStructuralTests(unittest.TestCase):
         self.assertIn("label.net{display:flex;align-items:center", page)
         self.assertIn('label class=\\"net\\"', page)
 
+    def test_rejection_never_echoes_the_live_session_token(self):
+        # A request without a valid token must not be able to read that token
+        # back from the error page: both pre-token rejections serve a form
+        # with no token field at all.
+        source = self.source
+        for marker_text, code in (("if (!fields.ok) {", "400"),
+                                  ("if (!portal::tokenMatches(portalFormToken, fields.token)) {",
+                                   "403")):
+            branch = source.split(marker_text, 1)[1]
+            branch = branch[:branch.index("return;")]
+            self.assertIn('portalReply(%s,' % code, branch)
+            self.assertIn("renderPortalFormUnverified(", branch)
+            self.assertNotIn("renderPortalForm(", branch)
+        unverified = source.split("static std::string renderPortalFormUnverified", 1)[1]
+        unverified = unverified[:unverified.index("\n}")]
+        self.assertNotIn("portalFormToken", unverified)
+
 if __name__ == "__main__":
     unittest.main()
 
