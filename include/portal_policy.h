@@ -303,4 +303,49 @@ inline FormFields parseForm(const char *body, size_t length) {
   result.ok = sawSsid && sawPassword;
   return result;
 }
+
+// application/x-www-form-urlencoded body of POST /rgborder (S7): exactly
+// the two keys `order` and `token`, each at most once, no unknown keys —
+// the same URL rules (decodeUrlValue) and shape discipline as the
+// credentials form above. The value's meaning is reviewed later by
+// rgb_order::parseOrder; here only the shape is decided.
+struct OrderFields {
+  bool ok = false;
+  std::string order, token;
+};
+
+inline OrderFields parseOrderForm(const char *body, size_t length) {
+  OrderFields result;
+  const std::string input(body, length);
+  bool sawOrder = false, sawToken = false;
+  size_t start = 0;
+  for (;;) {
+    const size_t amp = input.find('&', start);
+    const bool last = amp == std::string::npos;
+    const std::string pair =
+        input.substr(start, (last ? input.size() : amp) - start);
+    if (!pair.empty()) {
+      const size_t eq = pair.find('=');
+      if (eq == std::string::npos) return result;
+      const std::string key = pair.substr(0, eq);
+      std::string value;
+      if (!decodeUrlValue(pair.substr(eq + 1), value)) return result;
+      if (key == "order") {
+        if (sawOrder) return result;
+        result.order = value;
+        sawOrder = true;
+      } else if (key == "token") {
+        if (sawToken) return result;
+        result.token = value;
+        sawToken = true;
+      } else {
+        return result;
+      }
+    }
+    if (last) break;
+    start = amp + 1;
+  }
+  result.ok = sawOrder && sawToken;
+  return result;
+}
 } // namespace portal

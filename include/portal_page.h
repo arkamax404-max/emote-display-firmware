@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "portal_policy.h" // portal::ScanEntry, one candidate per radio button
+#include "rgb_order.h"     // rgb_order::ORDER_COUNT, the six named orders
 
 // T2/T3 portal page renderer (S3, S4) with the S5 network selector (T7): the
 // captive-portal configuration page as a pure, host-testable string builder
@@ -21,6 +22,12 @@
 // gone — a hidden or out-of-range network cannot be configured here; USB
 // provisioning remains the route for those. The CSRF token and the
 // never-echoed password field are unchanged.
+//
+// S7 selector: the page also carries a second, separate form (POST
+// /rgborder) with the six named channel orders, carrying the same session
+// token as the credentials form; saving reboots the board, which the page
+// says plainly next to the selector. `current` preselects the order the
+// board is actually running (the persisted value, RGB by default).
 namespace portal_page {
 
 inline std::string escapeHtml(const std::string &raw) {
@@ -44,7 +51,8 @@ inline std::string escapeHtml(const std::string &raw) {
 // never pre-filled. `networks` is the already-shaped scan selection (the
 // caller ran portal::selectNetworks).
 inline std::string formPage(const std::string &error = "", const std::string &token = "",
-                            const std::vector<portal::ScanEntry> &networks = {}) {
+                            const std::vector<portal::ScanEntry> &networks = {},
+                            rgb_order::Order current = rgb_order::Order::RGB) {
   std::string page =
       "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -56,6 +64,8 @@ inline std::string formPage(const std::string &error = "", const std::string &to
       // block and pushing its label out of line.
       "input[type=password]{display:block;width:100%;box-sizing:border-box;"
       "margin:0.5em 0;padding:0.5em}"
+      "select{display:block;width:100%;box-sizing:border-box;margin:0.5em 0;"
+      "padding:0.5em}"
       "label.net{display:flex;align-items:center;gap:0.6em;padding:0.35em 0}"
       "label.net input{margin:0;flex:0 0 auto}"
       "label.net span{flex:1 1 auto;word-break:break-all}"
@@ -85,7 +95,31 @@ inline std::string formPage(const std::string &error = "", const std::string &to
       "autocomplete=\"new-password\" "
       "placeholder=\"Password (leave empty for an open network)\">"
       "<button type=\"submit\">Save</button>"
-      "</form></body></html>";
+      "</form>";
+  // S7: the channel-order selector is submitted by its OWN form to its OWN
+  // route; the credentials form above is untouched. The session token is
+  // required exactly like the credentials form and a tokenless POST is
+  // never accepted. The board restarts to apply the choice — said plainly
+  // on the page.
+  page += "<h2>Panel colours</h2>"
+          "<p>If the colours come out wrong, pick the channel order this "
+          "panel shows on its data pins and save. The board restarts to "
+          "apply it.</p>"
+          "<form method=\"POST\" action=\"/rgborder\">";
+  if (!token.empty()) page += "<input type=\"hidden\" name=\"token\" value=\"" + escapeHtml(token) + "\">";
+  page += "<select name=\"order\">";
+  for (uint8_t i = 0; i < rgb_order::ORDER_COUNT; ++i) {
+    const rgb_order::Order order = static_cast<rgb_order::Order>(i);
+    page += "<option value=\"";
+    page += rgb_order::orderName(order);
+    if (order == current) page += "\" selected>";
+    else page += "\">";
+    page += rgb_order::orderName(order);
+    page += order == rgb_order::Order::RGB ? " (default)</option>" : "</option>";
+  }
+  page += "</select>"
+          "<button type=\"submit\">Apply colour order</button>"
+          "</form></body></html>";
   return page;
 }
 
@@ -98,5 +132,16 @@ inline std::string savedPage() {
          "<h1>gentle-matrix</h1>"
          "<p>Credentials saved. The display is restarting to join that "
          "network &mdash; you can close this page.</p></body></html>";
+}
+
+// The S7 success page: the channel order was persisted; the display
+// restarts to apply it on the panel.
+inline std::string orderSavedPage() {
+  return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+         "<title>gentle-matrix colour order saved</title></head><body>"
+         "<h1>gentle-matrix</h1>"
+         "<p>Colour order saved. The display is restarting to apply it "
+         "&mdash; you can close this page.</p></body></html>";
 }
 } // namespace portal_page

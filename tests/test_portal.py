@@ -533,6 +533,85 @@ class MainWiringStructuralTests(unittest.TestCase):
         unverified = unverified[:unverified.index("\n}")]
         self.assertNotIn("portalFormToken", unverified)
 
+# --- S7/T10: structural pins on the channel-order wiring ---------------------
+
+class ChannelOrderStructuralTests(unittest.TestCase):
+    """Secondary evidence only, in the MainWiringStructuralTests style: the
+    functional pins are the rig in tests/test_rgb_order.py; these pin that
+    main.cpp actually applies the persisted order when the panel object is
+    initialised and wires the new surfaces exactly as the S7 decisions
+    require."""
+
+    def setUp(self):
+        self.source = (ROOT / "src/main.cpp").read_text()
+
+    def test_order_is_read_and_applied_before_the_panel_exists(self):
+        # Adafruit_Protomatter copies the pin list inside its constructor
+        # (core.c: _PM_init memcpy), so the NVS order must be read and the
+        # base pins permuted before the panel object is constructed at boot,
+        # never as an untouchable static global.
+        setup = self.source.split("void setup() {", 1)[1]
+        setup = setup[:setup.index("\n}")]
+        self.assertLess(setup.index('preferences.getUChar("rgborder"'),
+                        setup.index("new (panelStorage) Adafruit_Protomatter("))
+        self.assertLess(setup.index("rgb_order::applyOrder(channelOrder, rgbPins);"),
+                        setup.index("new (panelStorage) Adafruit_Protomatter("))
+        self.assertLess(setup.index("new (panelStorage) Adafruit_Protomatter("),
+                        setup.index("matrix.begin()"))
+        # The static storage keeps the `matrix` identity the whole file uses.
+        self.assertIn("alignas(Adafruit_Protomatter) static uint8_t panelStorage",
+                      self.source)
+        self.assertIn("static Adafruit_Protomatter &matrix = ", self.source)
+        self.assertIn("#include <new>", self.source)
+
+    def test_persisted_order_has_its_own_key_outside_the_reset_scope(self):
+        # Own key, not one of the reset keys; the DOWN reset scope stays
+        # exactly ssid/password/updir and can never erase the channel order.
+        store = self.source.split("static bool storeRgbOrder(", 1)[1]
+        store = store[:store.index("\n}")]
+        self.assertIn('preferences.putUChar("rgborder"', store)
+        self.assertIn('preferences.isKey("rgborder")', store)
+        self.assertIn("preferences.getUChar", store)  # read-back verification
+        reset_header = (ROOT / "include" / "wifi_credentials_reset.h").read_text()
+        self.assertNotIn("rgborder", reset_header)
+
+    def test_console_rgb_command_saves_through_the_shared_path(self):
+        console = self.source.split("static serial::ProvisionConsole provisionConsole({", 1)[1]
+        console = console[:console.index("});")]
+        self.assertIn("storeRgbOrder(order)", console)
+
+    def test_portal_order_route_is_token_gated_and_restarts(self):
+        save = self.source.split("static void beginPortalOrderSave(", 1)[1]
+        save = save[:save.index("\n}")]
+        self.assertIn("portal::parseOrderForm(", save)
+        self.assertIn("portal::tokenMatches(portalFormToken, fields.token)", save)
+        self.assertIn("portalReply(403,", save)
+        self.assertIn("renderPortalFormUnverified(", save[:save.index("return;")])
+        self.assertIn("rgb_order::parseOrder(", save)
+        self.assertIn("storeRgbOrder(", save)
+        self.assertIn("portal_page::orderSavedPage()", save)
+        self.assertIn("ESP.restart()", save)
+
+    def test_dispatch_accepts_rgborder_without_disturbing_save(self):
+        dispatch = self.source.split("static void dispatchPortalRequest() {", 1)[1]
+        dispatch = dispatch[:dispatch.index("\n}")]
+        self.assertIn('line.path != "/save" && line.path != "/rgborder"', dispatch)
+        self.assertIn('line.path == "/rgborder"', dispatch)
+        # The validating 503 guard still covers both POST routes.
+        self.assertIn("portalPhase == PortalPhase::Validating", dispatch)
+        self.assertIn("beginPortalValidation(", dispatch)
+
+    def test_portal_form_renders_the_current_channel_order(self):
+        # Both render paths pass the persisted order so the selector
+        # preselects what the board is actually using.
+        render = self.source.split("static std::string renderPortalForm(", 1)[1]
+        render = render[:render.index("\n}")]
+        self.assertIn("channelOrder", render)
+        unverified = self.source.split("static std::string renderPortalFormUnverified(", 1)[1]
+        unverified = unverified[:unverified.index("\n}")]
+        self.assertIn("channelOrder", unverified)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -9,9 +9,11 @@ port 80) so the network can be reconfigured from a phone. The page offers a
 Implemented in `include/portal_policy.h` (host-testable decisions),
 `include/portal_page.h` (host-testable HTML renderer),
 `include/wifi_credentials_reset.h` (host-testable hold state machine and
-verified erase) and `src/main.cpp`. Covered by `tests/test_portal.py`
-and `tests/test_reset.py`. Task `odd/tasks/wifi-captive-portal-fallback.md`,
-T1-T9; T6 (UF2 + device write) is separately authorized.
+verified erase), `include/rgb_order.h` (the S7 panel channel-order mapping)
+and `src/main.cpp`. Covered by `tests/test_portal.py`, `tests/test_reset.py`
+and `tests/test_rgb_order.py`. Task
+`odd/tasks/wifi-captive-portal-fallback.md`, T1-T10; T6 (UF2 + device write)
+is separately authorized.
 
 ## When the portal opens
 
@@ -148,8 +150,9 @@ the station server is not listening. The station's HTTP routes, mDNS and
   to the password slide.
 - The pinned 10-pixel serial RX diagnostic overlay, session ownership,
   PNG reception, orientation handling and the Wi-Fi info button overlay all
-  work unchanged; `pollProvisioning` remains the only reader of `Serial`
-  and no new serial console command was added.
+  work unchanged; `pollProvisioning` remains the only reader of `Serial`.
+  The console gains one single-line command, `RGB <order>` (see below);
+  nothing else about the console protocol changes.
 - During validation the panel shows `TRY WIFI / CHECK`; on successful save
   `WIFI / SAVING` until the restart.
 
@@ -180,6 +183,50 @@ that button; the UP button of the Wi-Fi info overlay is GPIO 6):
 - After the restart with no credentials stored, the boot gate decides as
   always: with a USB host enumerated, `SET WIFI / VIA USB`; without one, the
   portal opens immediately.
+
+## Panel channel order (colours)
+
+`src/main.cpp` wires the six HUB75 data pins as R1 G1 B1 R2 G2 B2 on GPIOs
+42, 41, 40, 38, 39, 37. Some panels connect those inputs to different LED
+colours, so what the firmware draws as red can come out green (this specific
+panel does). The firmware keeps that default (`RGB`) and adds the **six
+named channel orders** — `RGB`, `RBG`, `GRB`, `GBR`, `BRG`, `BGR` — chosen
+persistently and applied at every boot when the panel object is
+constructed:
+
+- The pure mapping lives in `include/rgb_order.h`, host-tested in
+  `tests/test_rgb_order.py`: the order **names the colour sequence the panel
+  lights on its three data inputs of each row, in the base wiring order**;
+  `RGB` is therefore the untouched default, and the firmware then drives
+  each Protomatter colour slot with the base pin that reaches the panel
+  input which lights that colour. All six permutations are complete and
+  distinct; a wrong pick just shows wrong colours again and never harms
+  the panel, so the choice can simply be cycled until the colours come out
+  right.
+- The choice is persisted as a small code (0–5) under its own key
+  `rgborder` in the `gentle` namespace, verified by read-back like the
+  credential store, and read at boot before the panel is constructed (the
+  Protomatter constructor copies the pin list, so the order must exist
+  before the panel object exists). An absent or unreadable value falls
+  back to `RGB`: existing boards are unchanged.
+- **USB console**: send `RGB <order>` as a single provisioning line (the
+  order name is case-insensitive, e.g. `RGB GRB` or `RGB bgr`). Success
+  answers `RGB_SAVED` and the board restarts; an unparseable name answers
+  `RGB_ERROR: unknown channel order` and a store that cannot be verified
+  answers `RGB_ERROR: storage failed` — either error changes no stored
+  state and does not restart.
+- **Portal**: the configuration page gains a second, separate form
+  ("Panel colours") with a dropdown of the six orders, submitted by its
+  own form to its own route, `POST /rgborder`. It carries the same session
+  token as the credentials form and a tokenless request is never accepted;
+  the credential path, the scan list and the validate-before-persist flow
+  are untouched. The page says plainly that **the board restarts to apply
+  the choice**, and the success page repeats it.
+- **The DOWN reset keeps its scope**: the 5-second hold still erases
+  exactly `ssid`, `password` and `updir`; the channel order survives it.
+- Still unverified without this specific panel on the bench: which of the
+  six orders that panel actually needs, and how the colours look after the
+  restart on real hardware.
 
 ## Residual risk: the passphrase crosses the air in the clear
 

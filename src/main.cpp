@@ -19,9 +19,11 @@
 #include "firmware_version.h"
 #include "portal_policy.h"
 #include "portal_page.h"
+#include "rgb_order.h"
 #include "wifi_credentials_reset.h"
 #include <DNSServer.h>
 #include <esp_system.h>
+#include <new> // placement construction of the panel after the order is known
 
 // TI USB gate: a USB HOST is enumerated by the bus — what S1 asks for — not
 // Serial's operator bool(), which only turns true with DTR+RTS asserted and
@@ -30,10 +32,17 @@
 // call; the symbol ships with the core's TinyUSB CDC support.
 extern "C" bool tud_mounted(void);
 
-static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
+static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37}; // base wiring R1 G1 B1 R2 G2 B2; permuted per the S7 channel order before construction
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
-// Standard 1/32-scan HUB75; official Adafruit MatrixPortal S3 pinout.
-static Adafruit_Protomatter matrix(64, panel::BIT_DEPTH, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
+// S7/T10: Adafruit_Protomatter copies the pin list inside its constructor
+// (core.c _PM_init memcpy), which runs at static init — before NVS is
+// reachable — so the persisted channel order could never reach an ordinary
+// static object. The panel is instead constructed on this aligned storage
+// in setup(), immediately after the stored order is applied to rgbPins; the
+// `matrix` reference keeps every call site below unchanged.
+alignas(Adafruit_Protomatter) static uint8_t panelStorage[sizeof(Adafruit_Protomatter)];
+static Adafruit_Protomatter &matrix = *reinterpret_cast<Adafruit_Protomatter *>(panelStorage);
+static rgb_order::Order channelOrder = rgb_order::Order::RGB; // applied before construction, rendered in the portal selector
 static FrameDecoder frameDecoder;
 static Adafruit_LIS3DH accelerometer;
 static Orientation orientation;
@@ -127,6 +136,22 @@ static bool storeCredentials(const char *newSsid, const char *newPassword) {
   return saved;
 }
 
+// S7/T10: the channel order persists as a small code (0-5) under its own
+// key `rgborder` in the same `gentle` namespace — deliberately NOT one of
+// the DOWN reset keys (those stay exactly ssid/password/updir). putUChar
+// returns zero for the value 0 (the RGB default), so like the credential
+// store the put result is never trusted: read-back decides.
+static bool storeRgbOrder(rgb_order::Order order) {
+  bool saved = false;
+  if (preferences.begin("gentle", false)) {
+    preferences.putUChar("rgborder", rgb_order::orderCode(order));
+    saved = preferences.isKey("rgborder") &&
+            preferences.getUChar("rgborder", 255) == rgb_order::orderCode(order);
+    preferences.end();
+  }
+  return saved;
+}
+
 // DOWN long-press credential reset (T8, S6). The poller runs in every mode —
 // connected, retrying or serving the portal — never reads or blocks Serial,
 // and shows no panel message (the user chose silence; the restart is the
@@ -179,9 +204,10 @@ class ProvisionedPrefs : public wifi_reset::CredentialStore {
 };
 
 // S6 verified erase: only `ssid`, `password` and `updir` are removed, each
-// verified gone by read-back; brightness and every other stored value stay
-// untouched. False means the removal could not be verified (the caller then
-// does NOT restart, so another hold can retry).
+// verified gone by read-back; brightness, the S7 `rgborder` channel order
+// and every other stored value stay untouched, and nothing is written
+// outside that namespace. False means the removal could not be verified
+// (the caller then does NOT restart, so another hold can retry).
 static bool clearProvisionedCredentials() {
   static ProvisionedPrefs store(preferences);
   if (!preferences.begin("gentle", false)) return false;
@@ -223,6 +249,7 @@ static serial::ProvisionConsole provisionConsole({
     },
     []() { resetOrientationReference(); },
     []() { delay(100); ESP.restart(); },
+    [](rgb_order::Order order) { return storeRgbOrder(order); },
 });
 // At most one bounded reply is pending (stop-and-wait): no application queue.
 static uint8_t serialReply[serial::REPLY_SIZE];
@@ -381,8 +408,9 @@ static std::string renderPortalForm(const std::string &error) {
   // 20 s credential check runs lists no networks; the phase is already back
   // to Portal by the time the post-conclusion re-renders happen.
   if (portalPhase == PortalPhase::Validating)
-    return portal_page::formPage(error, portalFormToken);
-  return portal_page::formPage(error, portalFormToken, scanVisibleNetworks());
+    return portal_page::formPage(error, portalFormToken, {}, channelOrder);
+  return portal_page::formPage(error, portalFormToken, scanVisibleNetworks(),
+                               channelOrder);
 }
 
 // A request that could not prove it holds the session token must not receive
@@ -390,8 +418,9 @@ static std::string renderPortalForm(const std::string &error) {
 // read the live token from the error page. The served form carries no token,
 // so the client reloads to get one.
 static std::string renderPortalFormUnverified(const std::string &error) {
-  if (portalPhase == PortalPhase::Validating) return portal_page::formPage(error);
-  return portal_page::formPage(error, "", scanVisibleNetworks());
+  if (portalPhase == PortalPhase::Validating)
+    return portal_page::formPage(error, "", {}, channelOrder);
+  return portal_page::formPage(error, "", scanVisibleNetworks(), channelOrder);
 }
 
 static void showPortalSlide() {
@@ -524,6 +553,43 @@ static void beginPortalValidation(const char *body, size_t length) {
   displayMessage("TRY WIFI", "CHECK");
 }
 
+// S7 POST /rgborder — the colour-order selector's own form and route. Same
+// session token as the credentials form: a request that cannot prove it
+// holds the token is never accepted and is never shown the token (both
+// pre-token rejections serve a tokenless form). On success the order is
+// stored with read-back verification and the board restarts to apply it;
+// any failure keeps the portal open and re-renders the form with the
+// reason, touching nothing else (the credential path, the scan list and
+// the validate-before-persist flow are untouched).
+static void beginPortalOrderSave(const char *body, size_t length) {
+  const portal::OrderFields fields = portal::parseOrderForm(body, length);
+  if (!fields.ok) {
+    portalError = "Malformed form data. Reload the page and try again.";
+    portalReply(400, "text/html; charset=utf-8", renderPortalFormUnverified(portalError));
+    return;
+  }
+  if (!portal::tokenMatches(portalFormToken, fields.token)) {
+    portalError = "Invalid or missing form token. Reload the page and try again.";
+    portalReply(403, "text/html; charset=utf-8", renderPortalFormUnverified(portalError));
+    return;
+  }
+  rgb_order::Order order;
+  if (!rgb_order::parseOrder(fields.order, order)) {
+    portalError = "Unknown colour order.";
+    portalReply(400, "text/html; charset=utf-8", renderPortalForm(portalError));
+    return;
+  }
+  if (!storeRgbOrder(order)) {
+    portalError = "Storage failed. Try again.";
+    portalReply(500, "text/html; charset=utf-8", renderPortalForm(portalError));
+    return;
+  }
+  displayMessage("RGB", "SAVED");
+  portalReply(200, "text/html; charset=utf-8", portal_page::orderSavedPage());
+  delay(100); // let the small success page drain, exactly like USB provisioning
+  ESP.restart();
+}
+
 static void dispatchPortalRequest() {
   const size_t firstLineEnd = portalRequest.find("\r\n");
   const portal::RequestLine line =
@@ -547,7 +613,10 @@ static void dispatchPortalRequest() {
     portalReply(200, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
-  if (line.path != "/save") {
+  // S7: the colour-order form has its own route; everything that is not
+  // the credentials form and not that route stays rejected without state
+  // changes.
+  if (line.path != "/save" && line.path != "/rgborder") {
     portalReply(405, "text/html; charset=utf-8",
                 renderPortalForm("Unsupported method or path."));
     return;
@@ -555,6 +624,11 @@ static void dispatchPortalRequest() {
   if (portalPhase == PortalPhase::Validating) {
     portalReply(503, "text/html; charset=utf-8",
                 renderPortalForm("Already validating. Wait a moment."));
+    return;
+  }
+  if (line.path == "/rgborder") {
+    beginPortalOrderSave(portalRequest.data() + portalHeaderEnd,
+                         portalRequest.size() - portalHeaderEnd);
     return;
   }
   beginPortalValidation(portalRequest.data() + portalHeaderEnd,
@@ -1019,6 +1093,18 @@ void setup() {
   Serial.begin(115200);
   pinMode(PIN_BUTTON_UP, INPUT_PULLUP); // MatrixPortal S3 UP button: GPIO6, active low.
   pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP); // DOWN button: GPIO7 (variant PIN_BUTTON_DOWN), active low — S6 reset.
+  // S7/T10: the channel order is storage-backed and must be known before
+  // the panel object exists (see panelStorage): read the small code
+  // read-only, fall back to the untouched RGB default on an unknown value,
+  // permute the base pins, and only then construct and begin the panel.
+  if (preferences.begin("gentle", true)) {
+    const uint8_t code = preferences.getUChar("rgborder", 0);
+    if (!rgb_order::orderFromCode(code, channelOrder))
+      channelOrder = rgb_order::Order::RGB;
+    preferences.end();
+  }
+  rgb_order::applyOrder(channelOrder, rgbPins);
+  new (panelStorage) Adafruit_Protomatter(64, panel::BIT_DEPTH, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
   const ProtomatterStatus status = matrix.begin();
   if (status != PROTOMATTER_OK) {
     for (;;) { Serial.printf("Matrix initialization failed: %d\n", static_cast<int>(status)); delay(1000); }

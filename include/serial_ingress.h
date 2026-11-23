@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include "rgb_order.h"
 #include "serial_protocol.h"
 
 // Serial-port multiplexing for T2. The USB serial port carries two traffic
@@ -46,7 +47,9 @@ class ProvisionConsole {
     std::function<void()> flush;                           // Serial.flush
     std::function<bool(const char *, const char *)> store; // ssid, password → saved
     std::function<void()> recalibrate;                     // ORIENT action
-    std::function<void()> reboot;                          // after WIFI_SAVED
+    std::function<void()> reboot;                          // after WIFI_SAVED / RGB_SAVED
+    // RGB <order> (S7): persist the panel channel order, then reboot.
+    std::function<bool(rgb_order::Order)> setOrder;
   };
 
   enum class Event : uint8_t { None, EnterBinary };
@@ -77,6 +80,27 @@ class ProvisionConsole {
     } else if (stage_ == 0 && line_ == ENTRY_COMMAND) {
       hooks_.print(ENTRY_ACK);
       result = Event::EnterBinary;
+    } else if (stage_ == 0 && line_ == "RGB") {
+      // `RGB` with no order name: the same rejection as a name that does
+      // not parse, so the console never waits for a second line here.
+      hooks_.print("RGB_ERROR: unknown channel order");
+    } else if (stage_ == 0 && line_.rfind("RGB ", 0) == 0) {
+      // S7: RGB <order> — single-line command that persists the panel
+      // channel order and reboots, mirroring the WIFI flow's report
+      // (message, flush, restart). The order name parses case-
+      // insensitively; anything else, and a store that cannot be
+      // verified, is rejected with the console's usual error shape and
+      // changes no stored state.
+      rgb_order::Order order;
+      if (!rgb_order::parseOrder(line_.substr(4), order)) {
+        hooks_.print("RGB_ERROR: unknown channel order");
+      } else if (!hooks_.setOrder || !hooks_.setOrder(order)) {
+        hooks_.print("RGB_ERROR: storage failed");
+      } else {
+        hooks_.print("RGB_SAVED");
+        hooks_.flush();
+        hooks_.reboot();
+      }
     } else if (stage_ == 1) {
       if (line_.empty() || line_.size() > 32) {
         stage_ = 0;
