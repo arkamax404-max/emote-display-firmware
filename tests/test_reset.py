@@ -365,12 +365,12 @@ class MainWiringStructuralTests(unittest.TestCase):
         self.assertIn("wifi_reset::eraseCredentials", self.source)
 
     def test_no_restart_when_erase_unverified(self):
-        # ESP.restart() sits inside the verified branch: on an unverified erase
-        # only the retry message follows, never a restart.
+        # ESP.restart() sits inside the verified branch and nothing follows it:
+        # an unverified erase just returns, and the next hold retries.
         poll = self.source.split("static void pollCredentialsReset()", 1)[1]
-        gate = poll.index("if (clearProvisionedCredentials())")
-        self.assertLess(poll.index("ESP.restart()", gate),
-                        poll.index("could not be verified"))
+        poll = poll[:poll.index("\n}")]
+        self.assertIn("if (clearProvisionedCredentials()) ESP.restart();", poll)
+        self.assertEqual(poll.count("ESP.restart()"), 1)
 
     def test_adapter_round_trips_updir_as_uchar(self):
         # Defect 1 (this session): the adapter snapshotted/restored `updir`
@@ -423,6 +423,22 @@ class OrientationFirstPaintStructuralTests(unittest.TestCase):
         self.assertLess(
             self.poll.index("if (!accelerometer.getEvent(&event)) return;"),
             self.poll.index("firstSampleSeen = true;"))
+    def test_down_poller_is_silent_and_never_blocks_serial(self):
+        # The poller runs in every mode and must not touch or hold the serial
+        # link that the provisioning console and the frame path own.
+        poll = self.source.split("static void pollCredentialsReset()", 1)[1]
+        poll = poll[:poll.index("\n}")]
+        self.assertNotIn("Serial.", poll)
+        self.assertNotIn("delay(", poll)
+
+    def test_empty_password_restore_is_readback_verified(self):
+        # putString() returns zero for a legitimately empty password, so the
+        # write must be checked by reading the key back, never by its return.
+        adapter = self.source.split("class ProvisionedPrefs", 1)[1]
+        adapter = adapter[:adapter.index("\n};")]
+        self.assertNotIn("putString(key, String(value.c_str())) != 0", adapter)
+        self.assertIn("preferences_.isKey(key)", adapter)
+        self.assertIn('preferences_.getString(key, "")', adapter)
 
 
 if __name__ == "__main__":

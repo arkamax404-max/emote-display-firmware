@@ -181,7 +181,11 @@ class ProvisionedPrefs : public wifi_reset::CredentialStore {
   }
   bool writeString(const char *key, const std::string &value) override {
     if (!isStringResetKey(key)) return false;
-    return preferences_.putString(key, String(value.c_str())) != 0;
+    // putString() returns the written length, which is zero for a legitimately
+    // empty password, so its return value cannot prove the write: verify by
+    // reading the key back instead of trusting it.
+    preferences_.putString(key, String(value.c_str()));
+    return preferences_.isKey(key) && preferences_.getString(key, "") == value.c_str();
   }
   bool readUChar(const char *key, uint8_t &value) override {
     if (std::strcmp(key, "updir") != 0) return false;
@@ -218,12 +222,11 @@ static bool clearProvisionedCredentials() {
 
 static void pollCredentialsReset() {
   if (!downHold.update(millis(), digitalRead(PIN_BUTTON_DOWN) == LOW)) return;
-  if (clearProvisionedCredentials()) {
-    Serial.println("RESET: Wi-Fi credentials erased; restarting");
-    delay(100); // let the log line drain
-    ESP.restart();
-  }
-  Serial.println("RESET: credential erase could not be verified; holding DOWN again retries");
+  // Deliberately silent and non-blocking: the reset poller runs in every mode
+  // and must not touch or hold the serial link, which the provisioning console
+  // and the binary frame path own. The user chose no panel feedback either, so
+  // the restart is the only signal.
+  if (clearProvisionedCredentials()) ESP.restart();
 }
 
 static WifiInfoOverlay wifiInfo;
