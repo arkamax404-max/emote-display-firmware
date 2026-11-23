@@ -12,13 +12,16 @@
 //             store whose keys are a bitmask: bit0 ssid, bit1 password,
 //             bit2 updir, bit3 brightness. The string keys hold fixed
 //             non-empty values; `updir` is stored as the unsigned byte it
-//             actually is (Preferences getUChar/putUChar), read and written
-//             through the typed accessors. removeKey leaves both key and
-//             value in place when its fail bit is set (simulated write
-//             failure); a failWrite bit makes the matching write report
-//             failure and store nothing (a restore write that cannot be
-//             persisted).
-//       erase <present> <fail> [<failwrite>]
+//             actually is (Preferences getUChar/putUChar, default 3), read
+//             and written through the typed accessors. removeKey leaves
+//             both key and value in place when its fail bit is set
+//             (simulated write failure); a failWrite bit makes the matching
+//             write report failure and store nothing (a restore write that
+//             cannot be persisted); a corrupt bit makes the matching write
+//             report success while storing a DIFFERENT value, so the
+//             subsequent read-back returns something else than what was
+//             asked (a restore write that lies).
+//       erase <present> <fail> [<failwrite> [<updir> [<corrupt>]]]
 //                             → "erase <ok|unverified> left=<mask>"
 //       dump                   → "dump ssid=<len>:<hex> password=<len>:<hex>
 //                              updir=<n> brightness=<len>:<hex>"
@@ -33,6 +36,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 void runHoldScript() {
@@ -56,11 +60,13 @@ void runHoldScript() {
 
 class FakeStore : public wifi_reset::CredentialStore {
  public:
-  FakeStore(unsigned keys, unsigned failMask, unsigned failWriteMask)
-      : keys_(keys), failMask_(failMask), failWriteMask_(failWriteMask) {
+  FakeStore(unsigned keys, unsigned failMask, unsigned failWriteMask,
+            unsigned updirValue, unsigned corruptMask)
+      : keys_(keys), failMask_(failMask), failWriteMask_(failWriteMask),
+        corruptMask_(corruptMask), updir_(static_cast<uint8_t>(updirValue)) {
     values_["ssid"] = "my ssid";
     values_["password"] = "p4ssw0rd!";
-    updir_ = 3;          // typed: the orientation byte the panel stores
+             // typed: the orientation byte the panel stores (in the ctor init list)
     values_["brightness"] = "16"; // out of scope, must survive untouched
   }
   bool hasKey(const char *key) override { return (keys_ & maskFor(key)) != 0; }
@@ -74,7 +80,7 @@ class FakeStore : public wifi_reset::CredentialStore {
   bool writeString(const char *key, const std::string &value) override {
     if (std::strcmp(key, "updir") == 0) return false;
     if ((failWriteMask_ & maskFor(key)) != 0) return false; // store nothing
-    values_[key] = value;
+    values_[key] = (corruptMask_ & maskFor(key)) != 0 ? value + "*" : value;
     keys_ |= maskFor(key);
     return true;
   }
@@ -87,7 +93,11 @@ class FakeStore : public wifi_reset::CredentialStore {
   bool writeUChar(const char *key, uint8_t value) override {
     if (std::strcmp(key, "updir") != 0) return false;
     if ((failWriteMask_ & maskFor(key)) != 0) return false; // store nothing
-    updir_ = value;
+    // A corrupt write reports success but persists a different byte, so
+    // the subsequent read-back returns something else than what was asked.
+    updir_ = (corruptMask_ & maskFor(key)) != 0
+                 ? static_cast<uint8_t>(value + 1u)
+                 : value;
     keys_ |= maskFor(key);
     return true;
   }
@@ -126,7 +136,7 @@ class FakeStore : public wifi_reset::CredentialStore {
   }
 
  private:
-  unsigned keys_ = 0, failMask_ = 0, failWriteMask_ = 0;
+  unsigned keys_ = 0, failMask_ = 0, failWriteMask_ = 0, corruptMask_ = 0;
   std::map<std::string, std::string> values_;
   uint8_t updir_ = 0;
 };
@@ -136,10 +146,19 @@ void runEraseScript() {
   while (std::getline(std::cin, line)) {
     std::istringstream args(line);
     std::string cmd;
-    unsigned present = 0, fail = 0, failWrite = 0;
-    args >> cmd >> present >> fail >> failWrite; // failWrite optional (0)
+    args >> cmd;
     if (cmd != "erase") continue;
-    FakeStore store(present, fail, failWrite);
+    // Optional positional args, each defaulted when absent: updir defaults
+    // to the fixed scenario byte 3, everything else to 0.
+    std::vector<unsigned> v;
+    unsigned x = 0;
+    while (args >> x) v.push_back(x);
+    const unsigned present = v.size() > 0 ? v[0] : 0u;
+    const unsigned fail = v.size() > 1 ? v[1] : 0u;
+    const unsigned failWrite = v.size() > 2 ? v[2] : 0u;
+    const unsigned updirValue = v.size() > 3 ? v[3] : 3u;
+    const unsigned corrupt = v.size() > 4 ? v[4] : 0u;
+    FakeStore store(present, fail, failWrite, updirValue, corrupt);
     const bool verified = wifi_reset::eraseCredentials(store);
     std::cout << "erase " << (verified ? "ok" : "unverified") << " left="
               << store.keys() << '\n';

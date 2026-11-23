@@ -189,15 +189,17 @@ class HoldResetTests(unittest.TestCase):
 
     # --- T8: verified erase scope ------------------------------------------------
 
-    def erase_keys(self, present, fail=0, failwrite=0):
+    def erase_keys(self, present, fail=0, failwrite=0, updir=3, corrupt=0):
         # The `erase` result line only; use erase_and_dump for value-level
-        # assertions.
-        return self.run_script(["erase %d %d %d" % (present, fail, failwrite)],
-                               mode="erase")[:1]
+        # assertions. `updir` is the stored typed byte (default 3) and
+        # `corrupt` is the corrupt-write mask (matching writes report success
+        # but persist a different value, so the read-back differs).
+        return self.run_script(["erase %d %d %d %d %d" % (
+            present, fail, failwrite, updir, corrupt)], mode="erase")[:1]
 
-    def erase_and_dump(self, present, fail=0, failwrite=0):
-        return self.run_script(["erase %d %d %d" % (present, fail, failwrite),
-                                "dump"], mode="erase")
+    def erase_and_dump(self, present, fail=0, failwrite=0, updir=3, corrupt=0):
+        return self.run_script(["erase %d %d %d %d %d" % (
+            present, fail, failwrite, updir, corrupt), "dump"], mode="erase")
 
     def test_erase_removes_exactly_ssid_password_updir(self):
         # brightness (bit 3) is out of scope: it must survive untouched.
@@ -282,6 +284,49 @@ class HoldResetTests(unittest.TestCase):
             "dump ssid=%s password=%s updir=%d brightness=%s" % (
                 _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
                 UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
+
+    def test_stored_updir_zero_survives_a_failed_removal_as_byte_zero(self):
+        # Gap 1: `updir` stored as the byte 0. Its removal fails, so the
+        # rollback writes the byte 0 back (write plus read-back) — a stored
+        # byte 0, not an empty string and not the absent state — and all
+        # three original values stay intact. In the same run a verified
+        # erase of the same stored zero reports updir absent, so the absent
+        # state stays distinguishable from a stored zero.
+        out = self.run_script(
+            ["erase 15 4 0 0",   # updir stored as 0, its removal fails
+             "dump",
+             "erase 15 0 0 0",   # same run: stored 0, removal succeeds
+             "dump"],
+            mode="erase")
+        self.assertEqual(out[0], "erase unverified left=15")
+        self.assertEqual(
+            out[1],
+            "dump ssid=%s password=%s updir=0 brightness=%s" % (
+                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+                _hexspec(BRIGHTNESS_VALUE)))
+        self.assertEqual(out[2], "erase ok left=8")
+        self.assertEqual(
+            out[3],
+            "dump ssid=- password=- updir=- brightness=%s"
+            % _hexspec(BRIGHTNESS_VALUE))
+
+    def test_restore_write_lies_but_read_back_catches_it(self):
+        # Gap 2: the restore write reports success while the subsequent
+        # read-back returns a different byte (the corrupt-write mode stores
+        # snapshot+1 = 4 instead of the snapshot 3). The erase must stay
+        # unverified — the only way the routine can know the write lied is
+        # the read-back, so an unverified verdict here is itself the proof
+        # the read-back actually happened — and the caller must not restart
+        # (pinned for every unverified erase by
+        # test_no_restart_when_erase_unverified). The dump shows the wrong
+        # byte did land in the store: the write was not a silent no-op.
+        out = self.erase_and_dump(15, fail=4, corrupt=4)  # updir restore lies
+        self.assertEqual(out[0], "erase unverified left=15")
+        self.assertEqual(
+            out[1],
+            "dump ssid=%s password=%s updir=4 brightness=%s" % (
+                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+                _hexspec(BRIGHTNESS_VALUE)))
 
     def test_success_path_removes_exactly_the_three_keys(self):
         # The success path removes exactly ssid/password/updir with verified
