@@ -1,7 +1,9 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // T1 captive-portal policy layer (S1, S2, S3, S4): pure, host-testable
 // decisions for the Wi-Fi captive portal fallback — the header-only style of
@@ -153,6 +155,48 @@ inline bool tokenMatches(const std::string &expected, const std::string &offered
   for (size_t i = 0; i < expected.size(); ++i)
     diff = static_cast<char>(diff | (expected[i] ^ offered[i]));
   return diff == 0;
+}
+
+// Shaping of one page render's scan results (S5, T7). The portal runs one
+// fresh WiFi.scanNetworks() per render; these pure rules select what the
+// page offers:
+// - hidden networks (empty SSID) are dropped: with the manual SSID field
+//   removed by the user's decision there is no way to enter them, and USB
+//   provisioning remains the route for those;
+// - duplicated SSIDs collapse to their strongest RSSI (the 2.4/5 GHz pair
+//   of one network is one choice);
+// - the list sorts by descending RSSI, the input order breaking ties, so
+//   the strongest networks come first deterministically;
+// - the list is capped at SCAN_MAX_ENTRIES so the page stays bounded.
+constexpr size_t SCAN_MAX_ENTRIES = 12;
+
+struct ScanEntry {
+  std::string ssid;
+  int32_t rssi;
+};
+
+inline std::vector<ScanEntry> selectNetworks(const ScanEntry *results,
+                                             size_t count) {
+  std::vector<ScanEntry> unique;
+  for (size_t i = 0; i < count; ++i) {
+    const ScanEntry &candidate = results[i];
+    if (candidate.ssid.empty()) continue; // hidden network: not selectable
+    bool kept = false;
+    for (ScanEntry &entry : unique) {
+      if (entry.ssid != candidate.ssid) continue;
+      if (candidate.rssi > entry.rssi) entry.rssi = candidate.rssi;
+      kept = true;
+      break;
+    }
+    if (!kept) unique.push_back(candidate);
+  }
+  std::stable_sort(unique.begin(), unique.end(),
+                   [](const ScanEntry &a, const ScanEntry &b) {
+                     return a.rssi > b.rssi;
+                   });
+  if (unique.size() > SCAN_MAX_ENTRIES)
+    unique.resize(SCAN_MAX_ENTRIES);
+  return unique;
 }
 
 // Bounded portal HTTP request shaping (T2). The portal parser accepts only

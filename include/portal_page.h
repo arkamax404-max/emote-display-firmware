@@ -1,15 +1,26 @@
 #pragma once
 #include <string>
+#include <vector>
 
-// T2/T3 portal page renderer (S3, S4): the captive-portal configuration page
-// as a pure, host-testable string builder with no Arduino/WiFi symbols. The
-// firmware serves it from the dedicated portal TCP server.
+#include "portal_policy.h" // portal::ScanEntry, one candidate per radio button
+
+// T2/T3 portal page renderer (S3, S4) with the S5 network selector (T7): the
+// captive-portal configuration page as a pure, host-testable string builder
+// with no Arduino/WiFi symbols. The firmware serves it from the dedicated
+// portal TCP server.
 //
 // Secrets by construction:
 // - The inputs are pre-filled with nothing: neither the offered home-network
 //   passphrase nor the generated AP password is ever echoed into the HTML.
 // - The rendered error text is an escaped human-readable reason, never the
 //   values that caused it.
+//
+// S5 selector (T7, user decision): the visible networks the fresh scan
+// found are offered as radio buttons of the single `ssid` field, every SSID
+// HTML-escaped in both the value and the label. The manual SSID input is
+// gone — a hidden or out-of-range network cannot be configured here; USB
+// provisioning remains the route for those. The CSRF token and the
+// never-echoed password field are unchanged.
 namespace portal_page {
 
 inline std::string escapeHtml(const std::string &raw) {
@@ -30,8 +41,10 @@ inline std::string escapeHtml(const std::string &raw) {
 // The form page. GET any path returns it (so probe URLs like
 // /generate_204 land on it and trigger the captive-portal prompt); after a
 // failed save, `error` re-renders inside a visible error block. Inputs are
-// never pre-filled.
-inline std::string formPage(const std::string &error = "", const std::string &token = "") {
+// never pre-filled. `networks` is the already-shaped scan selection (the
+// caller ran portal::selectNetworks).
+inline std::string formPage(const std::string &error = "", const std::string &token = "",
+                            const std::vector<portal::ScanEntry> &networks = {}) {
   std::string page =
       "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -48,9 +61,19 @@ inline std::string formPage(const std::string &error = "", const std::string &to
   page += "<form method=\"POST\" action=\"/save\">";
   if (!token.empty()) page += "<input type=\"hidden\" name=\"token\" value=\"" + escapeHtml(token) + "\">";
   page +=
-      "<input name=\"ssid\" maxlength=\"32\" autocapitalize=\"off\" "
-      "autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" "
-      "placeholder=\"Network name (SSID)\" required>"
+      "<fieldset><legend>Detected networks</legend>";
+  if (networks.empty()) {
+    page += "<p>No networks detected yet. Reload this page to scan again.</p>";
+  } else {
+    for (const portal::ScanEntry &network : networks) {
+      const std::string escaped = escapeHtml(network.ssid);
+      page += "<label><input type=\"radio\" name=\"ssid\" value=\"" + escaped +
+              "\" required> " + escaped + "</label>";
+    }
+  }
+  page +=
+      "</fieldset>"
+      "<p><a href=\"/\">Scan again</a></p>"
       "<input type=\"password\" name=\"password\" maxlength=\"63\" "
       "autocomplete=\"new-password\" "
       "placeholder=\"Password (leave empty for an open network)\">"

@@ -19,6 +19,7 @@
 #include "firmware_version.h"
 #include "portal_policy.h"
 #include "portal_page.h"
+#include "wifi_credentials_reset.h"
 #include <DNSServer.h>
 #include <esp_system.h>
 
@@ -125,6 +126,49 @@ static bool storeCredentials(const char *newSsid, const char *newPassword) {
   }
   return saved;
 }
+
+// DOWN long-press credential reset (T8, S6). The poller runs in every mode —
+// connected, retrying or serving the portal — never reads or blocks Serial,
+// and shows no panel message (the user chose silence; the restart is the
+// only feedback). PIN_BUTTON_DOWN from the variant pins_arduino.h: GPIO 7,
+// INPUT_PULLUP, active low; the UP button (GPIO 6) keeps its Wi-Fi info
+// overlay untouched.
+static wifi_reset::HoldReset downHold;
+
+// Preferences adapter for the host-tested erase routine: the `gentle`
+// namespace is already open read-write when eraseCredentials runs.
+class ProvisionedPrefs : public wifi_reset::CredentialStore {
+ public:
+  explicit ProvisionedPrefs(Preferences &prefs) : preferences_(prefs) {}
+  bool hasKey(const char *key) override { return preferences_.isKey(key); }
+  void removeKey(const char *key) override { preferences_.remove(key); }
+
+ private:
+  Preferences &preferences_;
+};
+
+// S6 verified erase: only `ssid`, `password` and `updir` are removed, each
+// verified gone by read-back; brightness and every other stored value stay
+// untouched. False means the removal could not be verified (the caller then
+// does NOT restart, so another hold can retry).
+static bool clearProvisionedCredentials() {
+  static ProvisionedPrefs store(preferences);
+  if (!preferences.begin("gentle", false)) return false;
+  const bool verified = wifi_reset::eraseCredentials(store);
+  preferences.end();
+  return verified;
+}
+
+static void pollCredentialsReset() {
+  if (!downHold.update(millis(), digitalRead(PIN_BUTTON_DOWN) == LOW)) return;
+  if (clearProvisionedCredentials()) {
+    Serial.println("RESET: Wi-Fi credentials erased; restarting");
+    delay(100); // let the log line drain
+    ESP.restart();
+  }
+  Serial.println("RESET: credential erase could not be verified; holding DOWN again retries");
+}
+
 static WifiInfoOverlay wifiInfo;
 static SenderStats senderStats;
 static SenderConnection senderConnection;
@@ -276,11 +320,36 @@ static void wipeRequestBuffer() {
 // Per-render CSRF token (R1): esp_random(), RAM only, embedded as a hidden
 // field in every rendered form and required exactly on POST /save.
 static std::string portalFormToken;
+
+// S5 (T7): one fresh scan per page render, under the
+// WIFI_AP_STA mode openPortal() maintains while the portal is open (a scan
+// needs the station interface; the AP and the phone's connection stay up).
+// The raw scan buffer is copied into the selection and deleted immediately
+// so memory stays bounded. The raw entries go through the host-tested
+// portal::selectNetworks rules: hidden SSIDs dropped, de-duplicated by SSID,
+// descending RSSI, capped at portal::SCAN_MAX_ENTRIES.
+static std::vector<portal::ScanEntry> scanVisibleNetworks() {
+  std::vector<portal::ScanEntry> raw;
+  const int16_t found = WiFi.scanNetworks();
+  if (found > 0) {
+    raw.reserve(static_cast<size_t>(found));
+    for (int16_t i = 0; i < found; ++i)
+      raw.push_back(portal::ScanEntry{WiFi.SSID(i).c_str(), WiFi.RSSI(i)});
+  }
+  WiFi.scanDelete();
+  return portal::selectNetworks(raw.data(), raw.size());
+}
+
 static std::string renderPortalForm(const std::string &error) {
   char token[9];
   snprintf(token, sizeof(token), "%08x", static_cast<unsigned>(esp_random()));
   portalFormToken = token;
-  return portal_page::formPage(error, token);
+  // The validation path never scans (S5 decision): a page served while the
+  // 20 s credential check runs lists no networks; the phase is already back
+  // to Portal by the time the post-conclusion re-renders happen.
+  if (portalPhase == PortalPhase::Validating)
+    return portal_page::formPage(error, token);
+  return portal_page::formPage(error, token, scanVisibleNetworks());
 }
 
 static void showPortalSlide() {
@@ -298,8 +367,10 @@ static void showPortalSlide() {
 static void openPortal() {
   portal::generateApPassword(apPassword, []() { return esp_random(); });
   // WPA2 (S3 correction): the password argument switches softAP to
-  // WPA2_PSK; never an open AP.
-  WiFi.mode(WIFI_AP);
+  // WPA2_PSK; never an open AP. WIFI_AP_STA (S5/T7) keeps the station
+  // interface on so every page render can run its fresh scan; the AP stays
+  // up the whole time.
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(portal::AP_SSID, apPassword, portal::AP_CHANNEL, 0,
               portal::AP_MAX_CLIENTS);
   // Wildcard answer with the AP address so the OS captive-portal detection
@@ -341,9 +412,10 @@ static long parsePortalContentLength(const std::string &requestHeaders) {
 }
 
 // S4 validation conclusion: success persists (same read-back verification as
-// the serial hook), replies and restarts; failure returns to AP-only, keeps
+// the serial hook), replies and restarts; failure keeps the portal open with
 // the stored credentials untouched, zeros the offered buffers and re-renders
-// the page with the error.
+// the page with the error. The portal stays in WIFI_AP_STA either way so the
+// next page render can scan (S5).
 static void concludePortalValidation(bool connected) {
   portalPhase = PortalPhase::Portal;
   if (portal::concludeValidation(connected) == portal::Outcome::SaveAndReboot) {
@@ -360,7 +432,7 @@ static void concludePortalValidation(bool connected) {
     return;
   }
   WiFi.disconnect(false);
-  WiFi.mode(WIFI_AP); // back to AP-only
+  WiFi.mode(WIFI_AP_STA); // portal stays AP+station: next render rescans (S5)
   zeroOffered();
   portalError = "Could not connect to that network. Check the name and password, then try again.";
   portalSlide = 0;
@@ -886,6 +958,7 @@ static void pollWifi() {
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BUTTON_UP, INPUT_PULLUP); // MatrixPortal S3 UP button: GPIO6, active low.
+  pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP); // DOWN button: GPIO7 (variant PIN_BUTTON_DOWN), active low — S6 reset.
   const ProtomatterStatus status = matrix.begin();
   if (status != PROTOMATTER_OK) {
     for (;;) { Serial.printf("Matrix initialization failed: %d\n", static_cast<int>(status)); delay(1000); }
@@ -937,6 +1010,7 @@ void loop() {
   pollProvisioning();
   pollOrientation();
   pollWifiInfoButton();
+  pollCredentialsReset();
   pollWifi();
   pollPortal();
   pollClock();

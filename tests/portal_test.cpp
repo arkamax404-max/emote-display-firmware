@@ -16,9 +16,17 @@
 //                              "pass <len> <escaped>"
 //       alphabet               panel-drawable AP password alphabet →
 //                              "alphabet <escaped>"
+//       nets <rssi> <hex> ...  raw WiFi.scanNetworks() results (rssi + SSID,
+//                              '-' = empty/hidden SSID) →
+//                              "nets <escaped ssid>|<rssi>;..." (selected:
+//                              de-duplicated by SSID, hidden dropped,
+//                              descending RSSI, capped at SCAN_MAX_ENTRIES)
 //
-//   page      include/portal_page.h rendering (HTML escape + error block).
-//       page <hex>             error text; empty hex = no error block →
+//   page      include/portal_page.h rendering (HTML escape + error block +
+//             the S5 network selector radio list).
+//       net <hex> <rssi>       add one scanned SSID/rssi to the render list
+//       clear                  drop the render list
+//       page <hex> <hex>       error text, CSRF token →
 //                              "page <escaped html>"
 #include "portal_policy.h"
 #include "portal_page.h"
@@ -28,6 +36,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 std::string unhex(const std::string &hex) {
@@ -140,6 +149,20 @@ void runPolicyScript() {
       char generated[portal::AP_PASSWORD_LEN + 1] = {};
       portal::generateApPassword(generated, lcgDraw);
       std::cout << "pass " << strlen(generated) << ' ' << escape(generated) << '\n';
+    } else if (cmd == "nets") {
+      std::vector<portal::ScanEntry> raw;
+      int32_t rssi = 0;
+      std::string hex;
+      while (args >> rssi) {
+        args >> hex;
+        raw.push_back(portal::ScanEntry{unhex(hex), rssi});
+      }
+      const std::vector<portal::ScanEntry> chosen =
+          portal::selectNetworks(raw.data(), raw.size());
+      std::cout << "nets";
+      for (const portal::ScanEntry &entry : chosen)
+        std::cout << ' ' << escape(entry.ssid) << '|' << entry.rssi;
+      std::cout << '\n';
     } else if (cmd == "alphabet") {
       std::cout << "alphabet " << portal::AP_ALPHABET << '\n';
     }
@@ -147,14 +170,25 @@ void runPolicyScript() {
 }
 
 void runPageScript() {
+  std::vector<portal::ScanEntry> networks;
   std::string line;
   while (std::getline(std::cin, line)) {
     std::istringstream args(line);
     std::string cmd, errorHex, tokenHex;
-    args >> cmd >> errorHex >> tokenHex;
-    if (cmd == "page") {
-      const std::string error = unhex(errorHex);
-      std::cout << "page " << escape(portal_page::formPage(error, unhex(tokenHex))) << '\n';
+    args >> cmd;
+    if (cmd == "net") {
+      std::string ssidHex;
+      int32_t rssi = 0;
+      args >> ssidHex >> rssi;
+      networks.push_back(portal::ScanEntry{unhex(ssidHex), rssi});
+    } else if (cmd == "clear") {
+      networks.clear();
+    } else if (cmd == "page") {
+      args >> errorHex >> tokenHex;
+      std::cout << "page "
+                << escape(portal_page::formPage(unhex(errorHex), unhex(tokenHex),
+                                                networks))
+                << '\n';
     }
   }
 }

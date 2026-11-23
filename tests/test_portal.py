@@ -229,12 +229,14 @@ class PortalTests(unittest.TestCase):
     # --- T2/T3: portal form page ----------------------------------------------
 
     def test_form_page_has_fields_and_save_action(self):
-        raw = self.run_script(["page "], mode="page")[0]
+        # S5: the SSID now arrives only from the scan's radio buttons; the
+        # save action and the password field are unchanged.
+        raw = self.run_script(["net " + feed(b"Alpha") + " 40", "page "], mode="page")[0]
         html = raw[len("page "):].replace("\\n", "\n")
         self.assertTrue(raw.startswith("page <!DOCTYPE html>"))
         self.assertIn('method="POST"', html)
         self.assertIn('action="/save"', html)
-        self.assertIn('name="ssid"', html)
+        self.assertIn('type="radio" name="ssid" value="Alpha" required>', html)
         self.assertIn('type="password"', html)
         self.assertIn('name="password"', html)
 
@@ -270,6 +272,77 @@ class PortalTests(unittest.TestCase):
         # Unknown keys and a repeated token still reject.
         for raw in (b"ssid=a&password=b&extra=1", b"ssid=a&password=b&token=x&token=y"):
             self.assertEqual(self.run_script(["form " + feed(raw)]), ["form error"])
+    # --- S5: scan selection policy --------------------------------------------
+
+    def scan_selection(self, raw):
+        tokens = []
+        for rssi, ssid in raw:
+            tokens.append(str(rssi))
+            tokens.append(ssid.hex() if ssid is not None else "-")
+        out = self.run_script(["nets " + " ".join(tokens)])[0]
+        self.assertTrue(out.startswith("nets "), out)
+        return [item.rsplit("|", 1) for item in out[len("nets "):].split(" ")]
+
+    def test_scan_selection_dedups_sorts_and_skips_hidden(self):
+        # Same SSID keeps the strongest RSSI, the empty (hidden) SSID is not
+        # selectable anywhere in the portal, the list sorts by descending
+        # RSSI and original order breaks ties.
+        self.assertEqual(self.scan_selection([
+            (40, b"Alpha"), (55, b"Alpha"), (-30, b"Beta"),
+            (70, None), (15, b"Gamma"),
+        ]), [["Alpha", "55"], ["Gamma", "15"], ["Beta", "-30"]])
+
+    def test_scan_selection_ties_keep_input_order(self):
+        self.assertEqual(self.scan_selection([(50, b"A"), (50, b"B"), (50, b"C")]),
+                         [["A", "50"], ["B", "50"], ["C", "50"]])
+
+    def test_scan_selection_is_capped_at_twelve(self):
+        raw = [(rssi, ("net%d" % rssi).encode()) for rssi in range(15)]
+        chosen = self.scan_selection(raw)
+        self.assertEqual(len(chosen), 12)
+        self.assertEqual([int(rssi) for _, rssi in chosen],
+                         list(range(14, 2, -1)))
+
+    # --- S5/T7: the selector on the page ----------------------------------------
+
+    def page_with(self, networks):
+        lines = ["net %s %d" % (n[0].hex(), n[1]) for n in networks]
+        lines.append("page - -")
+        return self.run_script(lines, mode="page")[0][len("page "):].replace("\\n", "\n")
+
+    def test_form_page_lists_networks_as_radio_buttons(self):
+        html = self.page_with([(b"Alpha", 40), (b"Beta", 20)])
+        self.assertIn('<input type="radio" name="ssid" value="Alpha" required> Alpha</label>', html)
+        self.assertIn('<input type="radio" name="ssid" value="Beta" required> Beta</label>', html)
+        self.assertIn('<a href="/">Scan again</a>', html)
+
+    def test_form_page_escapes_ssid_values_and_labels(self):
+        html = self.page_with([(b'Bad"Network<1>&', -5)])
+        self.assertIn('value="Bad&quot;Network&lt;1&gt;&amp;"', html)
+        self.assertIn('required> Bad&quot;Network&lt;1&gt;&amp;</label>', html)
+
+    def test_form_page_without_networks_prompts_a_rescan(self):
+        html = self.page_with([])
+        self.assertNotIn('type="radio"', html)
+        self.assertIn("No networks detected yet", html)
+
+    def test_form_page_has_no_manual_ssid_field(self):
+        # The user removed the manual SSID input (S5); the SSID can only
+        # arrive as the value of one of the scan's radio buttons.
+        html = self.page_with([(b"Alpha", 40)])
+        self.assertNotIn("Network name (SSID)", html)
+        self.assertNotIn("<input name=", html)
+
+    def test_selector_keeps_token_and_never_reflects_a_password(self):
+        # Token unchanged, password input still never pre-filled, now with
+        # the radio list present.
+        lines = ["net Alpha 40"]
+        raw = self.run_script(lines + ["page " + feed(b"err") + " " + feed(b"ab12cd34")],
+                              mode="page")[0]
+        html = raw[len("page "):].replace("\\n", "\n")
+        self.assertIn('type="hidden" name="token" value="ab12cd34"', html)
+        self.assertNotIn("value=", html.split('name="password"', 1)[1].split(">", 1)[0])
+        self.assertIn("err", html)
 
 
 # --- structural pins on the firmware wiring (T4) ----------------------------
@@ -393,6 +466,20 @@ class MainWiringStructuralTests(unittest.TestCase):
         # R1: the rendered token is reviewed before the credentials are touched.
         self.assertIn("portal::tokenMatches(portalFormToken, fields.token)", self.source)
         self.assertIn("portalReply(403,", self.source)
+
+    def test_scan_runs_once_per_page_render_under_ap_sta(self):
+        # T7: the portal maintains WIFI_AP_STA while open so the scan has a
+        # station interface; the raw scan buffer is drawn once, copied and
+        # deleted; while validating no scan runs at all.
+        self.assertEqual(self.source.count("WiFi.scanNetworks()"), 1)
+        self.assertIn("WiFi.scanDelete()", self.source)
+        self.assertEqual(self.source.count("WiFi.mode(WIFI_AP)"), 0)
+        open_portal = self.source.split("static void openPortal()", 1)[1]
+        self.assertIn("WiFi.mode(WIFI_AP_STA)", open_portal)
+        render = self.source.split("static std::string renderPortalForm", 1)[1]
+        render = render[:render.index("\n}")]
+        self.assertIn("portalPhase == PortalPhase::Validating", render)
+        self.assertIn("scanVisibleNetworks()", render)
 
     def test_credential_storage_rolls_back_a_partial_write(self):
         # S4 promises the stored credentials stay untouched when a save fails;
