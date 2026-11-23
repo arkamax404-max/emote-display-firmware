@@ -3,6 +3,7 @@
 #include "idle_clock_image.h"
 #include <array>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <string>
 
@@ -278,6 +279,117 @@ int main(int argc, char **argv) {
     idle_clock::draw(calendar, 4, 10000, state.sessionTitle(56001),
                      [&](int x, int y, uint16_t color) { image[y * 64 + x] = color; });
     CHECK(image[1 * 64 + 12] == idle_clock::MUTED); // Even phase keeps the date.
+  } else if (test == "h24identical") {
+    // S9: the 24 h rendering is byte-identical to today: the legacy draw()
+    // signatures and the format-taking overloads with H24 produce the exact
+    // same canvases, and labels() keeps its exact strings.
+    std::tm calendar = {};
+    calendar.tm_year = 126; calendar.tm_mon = 11; calendar.tm_mday = 31;
+    std::array<uint16_t, 64 * 64> legacy, formatted, legacyTitle, formattedTitle;
+    for (const int hour : {0, 9, 12, 13, 23}) {
+      calendar.tm_hour = hour; calendar.tm_min = 34; calendar.tm_sec = 56;
+      legacy.fill(0xffff); formatted.fill(0xffff);
+      idle_clock::draw(calendar, 4, [&](int x, int y, uint16_t color) {
+        legacy[y * 64 + x] = color;
+      });
+      idle_clock::draw(calendar, 4, [&](int x, int y, uint16_t color) {
+        formatted[y * 64 + x] = color;
+      }, idle_clock::ClockFormat::H24);
+      CHECK(legacy == formatted);
+      legacyTitle.fill(0xffff); formattedTitle.fill(0xffff);
+      idle_clock::draw(calendar, 4, 5000, "LAB", [&](int x, int y, uint16_t color) {
+        legacyTitle[y * 64 + x] = color;
+      });
+      idle_clock::draw(calendar, 4, 5000, "LAB", [&](int x, int y, uint16_t color) {
+        formattedTitle[y * 64 + x] = color;
+      }, idle_clock::ClockFormat::H24);
+      CHECK(legacyTitle == formattedTitle);
+      const idle_clock::Labels a = idle_clock::labels(calendar);
+      const idle_clock::Labels b =
+          idle_clock::labels(calendar, idle_clock::ClockFormat::H24);
+      CHECK(std::string(a.date) == std::string(b.date) &&
+            std::string(a.hours) == std::string(b.hours) &&
+            std::string(a.minutes) == std::string(b.minutes) &&
+            std::string(a.seconds) == std::string(b.seconds));
+      CHECK(b.meridiem[0] == '\0'); // H24 records no meridiem label.
+    }
+  } else if (test == "clock12") {
+    // S9: 12 h labels: the hours go 12, 1..11 (never zero-padded) with the
+    // AM/PM label carried by the extended Labels record.
+    std::tm calendar = {};
+    calendar.tm_year = 126; calendar.tm_mon = 10; calendar.tm_mday = 9;
+    calendar.tm_min = 41; calendar.tm_sec = 17;
+    auto twelve = [&](unsigned hour) {
+      calendar.tm_hour = static_cast<int>(hour);
+      const idle_clock::Labels labels =
+          idle_clock::labels(calendar, idle_clock::ClockFormat::H12);
+      return std::string(labels.meridiem) + " " + labels.hours;
+    };
+    CHECK(twelve(0) == "AM 12" && twelve(1) == "AM 1" && twelve(11) == "AM 11");
+    CHECK(twelve(12) == "PM 12" && twelve(13) == "PM 1" && twelve(23) == "PM 11");
+    // AM/PM geometry, hour = 9 (H24 shows "09", H12 "9"): the 3x5 scale-1
+    // label sits above the seconds block at the seconds' x (46), its
+    // baseline row 28 exactly the scale-4 hour digits' baseline (9 + 5*4 - 1).
+    calendar.tm_hour = 9;
+    std::array<uint16_t, 64 * 64> h24, h12;
+    auto render = [&](idle_clock::ClockFormat format,
+                      std::array<uint16_t, 64 * 64> &out) {
+      out.fill(0xffff);
+      idle_clock::draw(calendar, 4, [&](int x, int y, uint16_t color) {
+        out[y * 64 + x] = color;
+      }, format);
+    };
+    render(idle_clock::ClockFormat::H24, h24);
+    render(idle_clock::ClockFormat::H12, h12);
+    CHECK(h12[9 * 64 + 12] == idle_clock::WHITE);  // '9' first row, scale 4.
+    CHECK(h12[28 * 64 + 12] == idle_clock::WHITE); // hour baseline row is inked.
+    CHECK(h12[24 * 64 + 47] == idle_clock::MUTED); // 'A' row0 010.
+    CHECK(h12[26 * 64 + 46] == idle_clock::MUTED); // 'A' row2 111.
+    CHECK(h12[24 * 64 + 50] == idle_clock::MUTED); // 'M' row0 101.
+    CHECK(h12[24 * 64 + 52] == idle_clock::MUTED);
+    CHECK(h12[28 * 64 + 50] == idle_clock::MUTED); // 'M' row4 101, baseline row.
+    // The baseline row only carries the label's own legs: 'A' 101 lights
+    // x46/48 and 'M' 101 lights x50/52; the gaps stay dark.
+    CHECK(h12[28 * 64 + 47] == 0 && h12[28 * 64 + 49] == 0 &&
+          h12[28 * 64 + 51] == 0);
+    // The gap between the label (baseline 28) and the seconds (start 33).
+    for (int y = 29; y <= 32; ++y) for (int x = 46; x <= 59; ++x)
+      CHECK(h12[y * 64 + x] == 0);
+    // The label tracks the hour: 22:41 -> "PM": 'P' {6,5,6,4,4} row0 110
+    // lights x46/47 at cell0, 'M' {5,7,7,5,5} row0 101 lights x50/52.
+    calendar.tm_hour = 22;
+    render(idle_clock::ClockFormat::H12, h12);
+    CHECK(h12[24 * 64 + 46] == idle_clock::MUTED &&
+          h12[24 * 64 + 47] == idle_clock::MUTED);
+    CHECK(h12[24 * 64 + 48] == 0);
+    CHECK(h12[24 * 64 + 50] == idle_clock::MUTED &&
+          h12[24 * 64 + 52] == idle_clock::MUTED);
+    // Every difference from the 24 h canvas stays inside the hour-digit
+    // block (x12..45, rows 9..28) plus the label cells (x46..59, rows
+    // 24..28) — the date band, minutes, colon, seconds, walkers and path
+    // never move.
+    render(idle_clock::ClockFormat::H24, h24);
+    bool moved = false;
+    for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) {
+      const uint16_t plain = h24[y * 64 + x], label = h12[y * 64 + x];
+      if (plain == label) continue;
+      moved = true;
+      const bool hourBand = y >= 9 && y <= 28 && x >= 12 && x <= 45;
+      const bool meridiem = y >= 24 && y <= 28 && x >= 46 && x <= 59;
+      CHECK(hourBand || meridiem);
+    }
+    CHECK(moved);
+    // The 12 h hours never zero-pad: at 9 o'clock the H24 "09" lights the
+    // second digit cell (x28..39) while the H12 "9" leaves it empty.
+    calendar.tm_hour = 9;
+    render(idle_clock::ClockFormat::H24, h24);
+    render(idle_clock::ClockFormat::H12, h12);
+    bool padded = false, spacer = true;
+    for (int x = 28; x <= 39; ++x) {
+      padded |= h24[9 * 64 + x] != 0;
+      spacer &= h12[9 * 64 + x] == 0;
+    }
+    CHECK(padded && spacer);
   } else return 2;
   std::cout << "OK\n";
 }

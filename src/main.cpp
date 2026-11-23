@@ -20,6 +20,7 @@
 #include "portal_policy.h"
 #include "portal_page.h"
 #include "rgb_order.h"
+#include "panel_settings.h"
 #include "wifi_credentials_reset.h"
 #include <DNSServer.h>
 #include <esp_system.h>
@@ -64,6 +65,12 @@ static std::string headers;
 static receiver::Request request;
 static size_t received = 0;
 static bool readingBody = false;
+// S8 /config request state: the first request line is classified before the
+// receiver protocol parser sees anything; the bounded settings form body
+// accumulates in its own small buffer, never in the PNG payload buffer.
+static bool configFirstLineChecked = false;
+static std::string configBody;
+static size_t configBodyLength = 0;
 static uint32_t requestStarted = 0;
 static bool listening = false;
 static String ssid, password;
@@ -150,6 +157,55 @@ static bool storeRgbOrder(rgb_order::Order order) {
     preferences.end();
   }
   return saved;
+}
+
+// S9: the clock display format is runtime state like the channel order,
+// defaulting to the untouched 24 h.
+static idle_clock::ClockFormat clockFormat = idle_clock::ClockFormat::H24;
+
+// S9/S10 settings persistence: both live in the `gentle` namespace under
+// their own keys (`brightness`, the percent byte; `clockformat`, the format
+// code), each verified by read-back — putUChar returns zero for a stored 0,
+// so like every other store here the put result is never trusted. Neither
+// key is in the DOWN-reset scope (wifi_reset erases exactly
+// ssid/password/updir). The stored pair is atomic: a write whose read-back
+// fails is rolled back so old/new values are never mixed, and an absent or
+// out-of-range stored value falls back to the defaults (30 %, 24 h).
+static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock) {
+  if (!panel::validBrightnessPercent(percent)) return false;
+  bool saved = false;
+  if (preferences.begin("gentle", false)) {
+    const bool hadBrightness = preferences.isKey("brightness");
+    const uint8_t previousBrightness = preferences.getUChar("brightness", 255);
+    const bool hadFormat = preferences.isKey("clockformat");
+    const uint8_t previousFormat = preferences.getUChar("clockformat", 255);
+    preferences.putUChar("brightness", percent);
+    preferences.putUChar("clockformat", idle_clock::clockFormatCode(clock));
+    saved = preferences.isKey("brightness") &&
+            preferences.getUChar("brightness", 255) == percent &&
+            preferences.isKey("clockformat") &&
+            preferences.getUChar("clockformat", 255) ==
+                idle_clock::clockFormatCode(clock);
+    if (!saved) {
+      if (hadBrightness) preferences.putUChar("brightness", previousBrightness);
+      else preferences.remove("brightness");
+      if (hadFormat) preferences.putUChar("clockformat", previousFormat);
+      else preferences.remove("clockformat");
+    }
+    preferences.end();
+  }
+  return saved;
+}
+
+static void loadPanelSettings() {
+  if (!preferences.begin("gentle", true)) return;
+  const uint8_t storedBrightness = preferences.getUChar("brightness", 255);
+  const uint8_t storedFormat = preferences.getUChar("clockformat", 255);
+  preferences.end();
+  if (panel::validBrightnessPercent(storedBrightness))
+    panel::setBrightnessPercent(storedBrightness);
+  idle_clock::ClockFormat format = idle_clock::ClockFormat::H24;
+  if (idle_clock::clockFormatFromCode(storedFormat, format)) clockFormat = format;
 }
 
 // DOWN long-press credential reset (T8, S6). The poller runs in every mode —
@@ -299,7 +355,7 @@ static void renderContent() {
                      clockState.sessionTitle(millis()),
                      [](int x, int y, uint16_t color) {
       matrix.drawPixel(x, y, panel::color(color));
-    });
+    }, clockFormat);
     return;
   }
   if (!hasFrame) {
@@ -474,21 +530,8 @@ static void portalReply(int code, const char *contentType, const std::string &bo
   wipeRequestBuffer();
 }
 
-// Bounded Content-Length extraction from the accumulated portal headers.
-static long parsePortalContentLength(const std::string &requestHeaders) {
-  std::string lower;
-  for (const char c : requestHeaders)
-    lower.push_back(static_cast<char>(tolower(static_cast<unsigned char>(c))));
-  const size_t key = lower.find("content-length:");
-  if (key == std::string::npos) return -1;
-  const size_t valueStart = requestHeaders.find_first_not_of(" \t", key + 15);
-  if (valueStart == std::string::npos) return -1;
-  const size_t valueEnd = requestHeaders.find('\r', valueStart);
-  if (valueEnd == std::string::npos) return -1;
-  const std::string digits = requestHeaders.substr(valueStart, valueEnd - valueStart);
-  if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos) return -1;
-  return strtol(digits.c_str(), nullptr, 10);
-}
+// Bounded Content-Length extraction from the accumulated portal headers:
+// the shared rules live in panel_settings::parseContentLength now.
 
 // S4 validation conclusion: success persists (same read-back verification as
 // the serial hook), replies and restarts; failure keeps the portal open with
@@ -700,7 +743,7 @@ static void pollPortal() {
         dispatchPortalRequest();
         return;
       }
-      const long contentLength = parsePortalContentLength(portalRequest.substr(0, portalHeaderEnd));
+      const long contentLength = panel_settings::parseContentLength(portalRequest.substr(0, portalHeaderEnd));
       if (contentLength < 0) {
         portalError = "Missing content length.";
         portalReply(411, "text/html; charset=utf-8", renderPortalForm(portalError));
@@ -801,6 +844,9 @@ static void closeRequest() {
   received = 0;
   readingBody = false;
   request = receiver::Request{};
+  configFirstLineChecked = false;
+  configBody.clear();
+  configBodyLength = 0;
 }
 
 // extra carries additional response headers (each ending in CRLF), used by
@@ -810,6 +856,90 @@ static void reply(int code, const String &body, const char *extra = "") {
                 code, code == 200 ? "OK" : "Error", extra, static_cast<unsigned>(body.length()));
   client.print(body);
   closeRequest();
+}
+
+// HTML replies (S8): the same bounded one-request reply discipline as
+// reply(), with the page content type instead of JSON.
+static void replyHtml(int code, const std::string &body) {
+  client.printf("HTTP/1.1 %d %s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %u\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+                code, code == 200 ? "OK" : "Error", static_cast<unsigned>(body.size()));
+  client.print(body.c_str());
+  closeRequest();
+}
+
+// --- S8 (T13): the LAN settings routes on the station server -------------
+
+// The settings page with the live values: one render helper for the GET
+// reply and for every POST rejection.
+static std::string configPageWithError(const std::string &error) {
+  return panel_settings::configPage(panel::brightnessPercent(), clockFormat, error);
+}
+
+// POST /config application: parse + review, then persist (read-back
+// verified, rollback discipline like the credential store), then apply
+// live. A rejected value or a malformed body re-renders the page with the
+// reason and changes nothing; the runtime state only moves after the store
+// verified. Neither setting needs a restart to take effect.
+static void applyConfigSave() {
+  const panel_settings::SettingsFields fields =
+      panel_settings::parseSettingsForm(configBody.data(), configBody.size());
+  const panel_settings::BrightnessChoice brightness =
+      panel_settings::reviewBrightness(fields.brightness);
+  const panel_settings::ClockChoice clock =
+      panel_settings::reviewClock(fields.clock);
+  const char *error = !fields.ok
+      ? "Malformed form data. Reload the page and try again."
+      : !brightness.ok ? "Unknown brightness value."
+      : !clock.ok ? "Unknown clock format."
+      : nullptr;
+  if (error) {
+    replyHtml(400, configPageWithError(error));
+    return;
+  }
+  if (storePanelSettings(brightness.percent, clock.format)) {
+    panel::setBrightnessPercent(brightness.percent);
+    clockFormat = clock.format;
+    presentDisplay(); // live application: this frame already uses the values
+    replyHtml(200, panel_settings::configSavedPage());
+    return;
+  }
+  replyHtml(500, configPageWithError("Storage failed. Try again."));
+}
+
+// First-line classification of the settings routes (S8). Runs BEFORE the
+// receiver protocol parser, whose routes (/emote, the session controls and
+// /health) and unknown-path 404 keep their exact semantics: only the exact
+// "GET /config" / "POST /config" lines are taken by this surface, everything
+// else is left to the parser untouched. Returns true when the request is now
+// owned by the settings path (a page was replied, or the bounded form body
+// is being read), false when the receiver parser owns it.
+static bool handleConfigRequestLine() {
+  const panel_settings::Route route =
+      panel_settings::routeOf(headers.substr(0, headers.size() - 2));
+  if (route == panel_settings::Route::Other) return false;
+  if (route == panel_settings::Route::Get) {
+    // The page is open on the LAN by decision (no authentication) and never
+    // scans: it renders from the live values only.
+    replyHtml(200, configPageWithError(""));
+    return true;
+  }
+  const long contentLength = panel_settings::parseContentLength(headers);
+  if (contentLength < 0) {
+    replyHtml(411, configPageWithError("Missing content length."));
+    return true;
+  }
+  if (contentLength > static_cast<long>(panel_settings::CONFIG_BODY_MAX)) {
+    replyHtml(413, configPageWithError("Form data too large."));
+    return true;
+  }
+  if (contentLength == 0) {
+    replyHtml(400, configPageWithError("Empty form."));
+    return true;
+  }
+  configBody.clear();
+  configBodyLength = static_cast<size_t>(contentLength);
+  readingBody = true;
+  return true;
 }
 
 // One active request, no frame queue. Parsing is bounded and yields each loop.
@@ -835,6 +965,13 @@ static void pollHttp() {
       }
       headers.push_back(static_cast<char>(value));
       if (headers.size() > receiver::MAX_HEADERS) { reply(431, "{\"error\":\"headers too large\"}"); return; }
+      // S8: classify the settings routes on the exact first request line,
+      // before the receiver protocol parser runs; see above.
+      if (!configFirstLineChecked && headers.size() >= 2 &&
+          headers.compare(headers.size() - 2, 2, "\r\n") == 0) {
+        configFirstLineChecked = true;
+        if (handleConfigRequestLine()) return;
+      }
       if (headers.size() < 4 || headers.compare(headers.size() - 4, 4, "\r\n\r\n")) continue;
       const int status = receiver::parseHeaders(headers, request);
       if (status == 400 && request.hasName && !request.nameValid) {
@@ -845,7 +982,9 @@ static void pollHttp() {
       if (status != 200) { reply(status, "{\"error\":\"unsupported request\"}"); return; }
       if (request.health) {
         reply(200, "{\"ok\":true,\"width\":64,\"height\":64,\"frames\":" + String(accepted) +
-            ",\"brightness\":" + String(panel::BRIGHTNESS) + ",\"topOffset\":" + String(panel::TOP_OFFSET) +
+            ",\"brightness\":" + String(panel::brightnessScale()) +
+            ",\"brightnessPercent\":" + String(panel::brightnessPercent()) +
+            ",\"topOffset\":" + String(panel::TOP_OFFSET) +
             ",\"bitDepth\":" + String(panel::BIT_DEPTH) + ",\"wifiInfo\":" + (wifiInfo.visible() ? "true" : "false") +
             ",\"accelerometer\":" + (accelerometerReady ? "true" : "false") +
             ",\"rotation\":" + String(orientation.rotation() * 90) +
@@ -889,6 +1028,14 @@ static void pollHttp() {
         return;
       }
       readingBody = true;
+    } else if (configBodyLength) {
+      // S8 POST /config body: a small bounded form read into its own buffer;
+      // completely disjoint from the PNG payload path.
+      configBody.push_back(static_cast<char>(value));
+      if (configBody.size() == configBodyLength) {
+        applyConfigSave();
+        return;
+      }
     } else {
       pngBytes[received++] = static_cast<uint8_t>(value);
       if (received == request.length) {
@@ -1113,6 +1260,9 @@ void setup() {
     for (;;) { Serial.printf("Matrix initialization failed: %d\n", static_cast<int>(status)); delay(1000); }
   }
   headers.reserve(receiver::MAX_HEADERS);
+  // S9/S10: persisted panel settings — each verified, an absent or
+  // out-of-range value falls back to its default (nothing is applied then).
+  loadPanelSettings();
   preferences.begin("gentle", true);
   ssid = preferences.getString("ssid", "");
   password = preferences.getString("password", "");

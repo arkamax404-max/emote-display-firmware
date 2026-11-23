@@ -440,7 +440,7 @@ class MainWiringStructuralTests(unittest.TestCase):
         poll = self.source.split("static void pollPortal() {", 1)[1]
         poll = poll[:poll.index("\n}")]
         self.assertLess(poll.index("portal::parseRequestLine"),
-                        poll.index("parsePortalContentLength("))
+                        poll.index("panel_settings::parseContentLength("))
         self.assertIn("if (head.ok && !head.isPost)", poll)
 
     def test_offered_body_wiped_from_the_request_buffer(self):

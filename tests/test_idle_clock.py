@@ -30,6 +30,8 @@ class IdleClockTests(unittest.TestCase):
     def test_title_phase_alternation_keeps_canonical_rows(self): self.run_case("titlephase")
     def test_title_truncates_above_sixteen_cells(self): self.run_case("truncation")
     def test_stale_no_session_restores_and_clears(self): self.run_case("nosession")
+    def test_24h_rendering_stays_byte_identical(self): self.run_case("h24identical")
+    def test_12_hour_labels_and_am_pm_geometry(self): self.run_case("clock12")
 
 
 if __name__ == "__main__":

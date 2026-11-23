@@ -8,10 +8,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def panel_color(color565):
-    # Mirror of panel::color (display_settings.h): brightness-scaled channels.
-    red = ((color565 >> 11) * 64 + 127) // 255
-    green = (((color565 >> 5) & 63) * 64 + 127) // 255
-    blue = ((color565 & 31) * 64 + 127) // 255
+    # Mirror of panel::color (display_settings.h): every channel is scaled by
+    # the live runtime brightness. The production helper is the single source
+    # of the formula — round((channel * scale) / 255) with the scale derived
+    # here from the DOCUMENTED DEFAULT PERCENTAGE (30 %) via the stated rule
+    # percent * 255 // 100, never from a duplicated scale constant.
+    scale = 30 * 255 // 100
+    red = ((color565 >> 11) * scale + 127) // 255
+    green = (((color565 >> 5) & 63) * scale + 127) // 255
+    blue = ((color565 & 31) * scale + 127) // 255
     return (red << 11) | (green << 5) | blue
 
 

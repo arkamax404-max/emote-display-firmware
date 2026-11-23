@@ -9,10 +9,12 @@ port 80) so the network can be reconfigured from a phone. The page offers a
 Implemented in `include/portal_policy.h` (host-testable decisions),
 `include/portal_page.h` (host-testable HTML renderer),
 `include/wifi_credentials_reset.h` (host-testable hold state machine and
-verified erase), `include/rgb_order.h` (the S7 panel channel-order mapping)
-and `src/main.cpp`. Covered by `tests/test_portal.py`, `tests/test_reset.py`
-and `tests/test_rgb_order.py`. Task
-`odd/tasks/wifi-captive-portal-fallback.md`, T1-T10; T6 (UF2 + device write)
+verified erase), `include/rgb_order.h` (the S7 panel channel-order mapping),
+`include/panel_settings.h` (the S8 LAN settings page: form parsing, value
+review, route classification, page rendering) and `src/main.cpp`. Covered by
+`tests/test_portal.py`, `tests/test_reset.py`, `tests/test_rgb_order.py` and
+`tests/test_settings.py`. Task
+`odd/tasks/wifi-captive-portal-fallback.md`, T1-T14; T6 (UF2 + device write)
 is separately authorized.
 
 ## When the portal opens
@@ -227,6 +229,69 @@ constructed:
 - Still unverified without this specific panel on the bench: which of the
   six orders that panel actually needs, and how the colours look after the
   restart on real hardware.
+
+## Panel settings over the LAN: `/config`
+
+Once the board is connected to its network, the **station HTTP server** (the
+receiver's own server, hosting `/emote` and `/health`) also serves a
+**settings page** at `http://<panel-ip>/config` (also
+`gentle-matrix.local/config` over mDNS), **open on the local network without
+authentication**, like every other route of that server. It offers exactly
+two settings and **neither needs a restart to take effect** (S8):
+
+- **Brightness (S10)**: percent from **10 to 80 in steps of 5**, default
+  **30 %**. A runtime value applied through ONE setter; every drawing layer
+  (clock, messages, version footer, diagnostic overlay, received PNGs)
+  scales through it with `percent * 255 / 100` (30 % = 76, the era of the
+  old compile-time constant 64/255). Persisted as a percent byte in
+  `gentle`/`brightness` with read-back verification; an absent or out-of-set
+  stored value falls back to the 30 % default. `/health` reports the live
+  channel scale in `brightness` (0-255) plus the additive live percent in
+  `brightnessPercent`.
+- **Clock format (S9)**: `24 h` (default, byte-identical to before) or
+  `12 h`: the hours go `12, 1..11` unpadded and an **AM/PM** label (3x5
+  glyphs at scale 1) is drawn above the seconds block at the seconds' x,
+  its baseline (row 28) exactly the scale-4 hour digits' baseline. Nothing
+  else moves — date/title band, minutes, colon, seconds, walkers and path
+  keep their pixels, and the 500 ms redraw cadence and the autonomous clock
+  timing are unchanged. Persisted as a small code (0 = 24 h, 1 = 12 h) in
+  `gentle`/`clockformat` with the same read-back verification; an invalid
+  code falls back to 24 h.
+
+Contract of the two routes, decided on the exact first request line
+(`GET /config HTTP/1.1|1.0`, `POST /config HTTP/1.1|1.0`) **before** the
+receiver protocol parser runs, so the receiver's routes and the unknown-path
+404 keep their exact semantics:
+
+- `GET /config` → the settings page (200, HTML) with the current values
+  preselected.
+- `POST /config` → an `application/x-www-form-urlencoded` body (≤ 255 bytes,
+  inside the one-client 2.5 s serving limits) with exactly the keys
+  `brightness` (decimal percent of the allowed set) and `clock` (`24h` or
+  `12h`), each at most once, no unknown keys; the shared portal URL rules
+  apply (`+` is a space, `%XX` requires two hex digits, bare control bytes
+  rejected). A rejected value or malformed body re-renders the page with the
+  escaped reason (400) and changes nothing; an accepted pair is persisted
+  with read-back verification and applied immediately (200 success page,
+  "no restart needed"); a store that cannot be verified is rolled back to
+  the exact stored pair (same discipline as the credential store) and
+  answers 500 without applying. Missing `Content-Length` → 411, empty body
+  → 400, oversized body → 413.
+- The two new keys are NOT in the DOWN-reset scope (the 5-second hold still
+  erases exactly `ssid`/`password`/`updir`); the brightness percent and the
+  clock format survive it.
+- The AP portal page does **not** expose these two settings: the task allowed
+  it ("may"), but they are usable as soon as the board has LAN reachability,
+  and keeping the hand-written portal server's route set unchanged was the
+  lower-risk choice. USB provisioning and the portal remain the credential
+  routes.
+
+Host verification: pure parsing/rendering/rules in `include/panel_settings.h`
+through `tests/settings_test.cpp` + `tests/test_settings.py`, brightness
+value rules in `tests/display_settings_test.cpp`, 12/24 h geometry in
+`tests/idle_clock_test.cpp`, and structural wiring pins in
+`tests/test_settings.py`. Still unverified on hardware: the visual effect of
+the brightness steps and of the 12 h AM/PM placement on the real panel.
 
 ## Residual risk: the passphrase crosses the air in the clear
 

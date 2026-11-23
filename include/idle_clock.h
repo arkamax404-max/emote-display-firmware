@@ -8,6 +8,18 @@ namespace idle_clock {
 constexpr const char *TIMEZONE = "CET-1CEST,M3.5.0,M10.5.0/3";
 enum class Source { Message, Frame, Clock, WifiInfo };
 
+// S9: display format of the autonomous clock. H24 is the untouched default;
+// a missing/invalid stored code decodes to it (see clockFormatCode below).
+enum class ClockFormat : uint8_t { H24, H12 };
+inline uint8_t clockFormatCode(ClockFormat format) {
+  return format == ClockFormat::H12 ? 1u : 0u;
+}
+inline bool clockFormatFromCode(uint8_t code, ClockFormat &out) {
+  if (code > 1) return false;
+  out = code == 1u ? ClockFormat::H12 : ClockFormat::H24;
+  return true;
+}
+
 // Only the serial main loop mutates this state. No epoch-based lease deadlines.
 class State {
  public:
@@ -62,16 +74,30 @@ class State {
   char name_[MAX_NAME + 1] = {};
 };
 
-struct Labels { char date[11], hours[3], minutes[3], seconds[3]; };
-inline Labels labels(const std::tm &calendar) {
+struct Labels { char date[11], hours[3], minutes[3], seconds[3], meridiem[3]; };
+inline Labels labels(const std::tm &calendar, ClockFormat format) {
   Labels result = {};
   // RTC localtime supplies valid calendar fields; bound widths explicitly.
   std::snprintf(result.date, sizeof(result.date), "%02u/%02u/%04u",
                 unsigned(calendar.tm_mday) % 100, unsigned(calendar.tm_mon + 1) % 100,
                 unsigned(calendar.tm_year + 1900) % 10000);
-  std::snprintf(result.hours, sizeof(result.hours), "%02u", unsigned(calendar.tm_hour) % 100);
+  // S9: H24 keeps the exact "02u" digits of today byte for byte. H12 maps
+  // midnight to "12" and the hours go 1..11 with an AM/PM label
+  // (meridiem) that H24 leaves empty.
+  if (format == ClockFormat::H12) {
+    const unsigned hour24 = unsigned(calendar.tm_hour) % 24;
+    std::snprintf(result.hours, sizeof(result.hours), "%u",
+                  hour24 % 12 == 0 ? 12u : hour24 % 12);
+    std::snprintf(result.meridiem, sizeof(result.meridiem),
+                  hour24 < 12 ? "AM" : "PM");
+  } else {
+    std::snprintf(result.hours, sizeof(result.hours), "%02u", unsigned(calendar.tm_hour) % 100);
+  }
   std::snprintf(result.minutes, sizeof(result.minutes), "%02u", unsigned(calendar.tm_min) % 100);
   std::snprintf(result.seconds, sizeof(result.seconds), "%02u", unsigned(calendar.tm_sec) % 100);
   return result;
+}
+inline Labels labels(const std::tm &calendar) {
+  return labels(calendar, ClockFormat::H24);
 }
 } // namespace idle_clock

@@ -90,15 +90,26 @@ void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixe
 
 
 // Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
+// S9: `format` selects the clock display; H24 (the default) renders byte
+// for byte what today's renderer renders. In H12 the hours go 12, 1..11
+// (from idle_clock::labels) and the AM/PM label is drawn 3x5 at scale 1
+// above the seconds block at the seconds' x (46): its rows are 24..28, so
+// its baseline row 28 is exactly the scale-4 hour digits' baseline
+// (9 + 5*4 - 1). Nothing outside the hour-digit cells and the label cells
+// moves: the date band, the minutes, the colon, the seconds, the walkers
+// and the path all stay where the H24 render puts them.
 template<class Pixel>
-void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel) {
+void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel,
+          ClockFormat format = ClockFormat::H24) {
   auto plot = [&](int x, int y, uint16_t color) {
     if (x >= 0 && x < 64 && y >= 0 && y < 64) pixel(x, y, color);
   };
   for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) plot(x, y, 0);
-  const Labels value = labels(calendar);
+  const Labels value = labels(calendar, format);
   text(value.date, 12, 1, 1, MUTED, plot);
   text(value.hours, 12, 9, 4, WHITE, plot);
+  if (format == ClockFormat::H12)
+    text(value.meridiem, 46, 24, 1, MUTED, plot);
   text(value.minutes, 12, 31, 4, BLUE, plot);
   text(":", 43, 35, 1, AMBER, plot);
   text(value.seconds, 46, 33, 2, AMBER, plot);
@@ -129,8 +140,8 @@ void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel) {
 // repainted, so every other pixel keeps the canonical content.
 template<class Pixel>
 void draw(const std::tm &calendar, uint64_t animationTick, uint64_t epochMillis,
-          const char *title, Pixel pixel) {
-  draw(calendar, animationTick, pixel);
+          const char *title, Pixel pixel, ClockFormat format = ClockFormat::H24) {
+  draw(calendar, animationTick, pixel, format);
   if (!title || !title[0] || (epochMillis / 5000) % 2 == 0) return;
   for (int y = 1; y <= 5; ++y) for (int x = 0; x < 64; ++x) pixel(x, y, 0);
   // ASCII-uppercased copy; multibyte UTF-8 sequences pass through untouched.
