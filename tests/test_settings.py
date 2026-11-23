@@ -18,8 +18,9 @@ def feed(text):
 
 
 class SettingsTests(unittest.TestCase):
-    """S8-S10 (T11-T13): the LAN settings page, the 12/24 h clock format and
-    the runtime brightness value rules, host-tested without a panel."""
+    """S7-S10 (T10, T11-T13 extendida): the LAN settings page (now including
+    the panel channel order), the 12/24 h clock format and the runtime
+    brightness value rules, host-tested without a panel."""
 
     @classmethod
     def setUpClass(cls):
@@ -97,31 +98,33 @@ class SettingsTests(unittest.TestCase):
 
     # --- POST /config form parsing and value review --------------------------
 
-    def test_form_parses_both_required_keys(self):
-        self.assertEqual(self.run_script(["form " + feed("brightness=45&clock=12h")]),
-                         ["form ok b=45 c=12h"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=80&clock=24h")]),
-                         ["form ok b=80 c=24h"])
+    def test_form_parses_all_three_required_keys(self):
+        self.assertEqual(self.run_script(["form " + feed("brightness=45&clock=12h&order=GRB")]),
+                         ["form ok b=45 c=12h o=GRB"])
+        self.assertEqual(self.run_script(["form " + feed("brightness=80&clock=24h&order=rgb")]),
+                         ["form ok b=80 c=24h o=rgb"])
 
     def test_form_url_rules_mirroring_the_portal(self):
-        # %XX decoding for both keys; '+' is a space; bare spaces and control
+        # %XX decoding for the keys; '+' is a space; bare spaces and control
         # bytes are rejected, not coerced.
-        self.assertEqual(self.run_script(["form " + feed("brightness=%34%35&clock=12h")]),
-                         ["form ok b=45 c=12h"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=+10&clock=12h")]),
-                         ["form ok b= 10 c=12h"])  # '+' -> space, review rejects below
-        self.assertEqual(self.run_script(["form " + feed("brightness=1 0&clock=12h")]),
+        self.assertEqual(self.run_script(["form " + feed("brightness=%34%35&clock=12h&order=BRG")]),
+                         ["form ok b=45 c=12h o=BRG"])
+        self.assertEqual(self.run_script(["form " + feed("brightness=+10&clock=12h&order=RGB")]),
+                         ["form ok b= 10 c=12h o=RGB"])  # '+' -> space, review rejects below
+        self.assertEqual(self.run_script(["form " + feed("brightness=1 0&clock=12h&order=RGB")]),
                          ["form error"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=10&clock=12%68")]),
-                         ["form ok b=10 c=12h"])
+        self.assertEqual(self.run_script(["form " + feed("brightness=10&clock=12%68&order=BGR")]),
+                         ["form ok b=10 c=12h o=BGR"])
 
     def test_form_rejects_missing_unknown_and_duplicate_keys(self):
-        for body in ("brightness=45", "clock=12h", "",
+        for body in ("brightness=45&clock=12h",  # the order key is missing
+                     "clock=12h&order=RGB", "brightness=45&order=RGB", "order=RGB", "",
                      "brightness=45&clock=12h&extra=1",
-                     "brightness=45&brightness=45&clock=12h",
-                     "clock=12h&clock=24h&brightness=45",
-                     "brightness45=45&clock=12h", "brightness",
-                     "brightness=45&clock=24h&clock=24h"):
+                     "brightness=45&brightness=45&clock=12h&order=RGB",
+                     "clock=12h&clock=24h&brightness=45&order=RGB",
+                     "brightness=45&clock=12h&order=RGB&order=RBG",
+                     "brightness45=45&clock=12h&order=RGB", "brightness",
+                     "brightness=45&clock=24h&clock=24h&order=RGB"):
             with self.subTest(body=body):
                 self.assertEqual(self.run_script(["form " + feed(body)]), ["form error"])
 
@@ -141,6 +144,16 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self.run_script(["clock " + feed(value)]),
                                  ["clock ok %s" % ok] if ok else ["clock error"])
+
+    def test_order_review_accepts_exactly_the_six_names(self):
+        for value, ok in (("RGB", "RGB"), ("RBG", "RBG"), ("GRB", "GRB"),
+                          ("GBR", "GBR"), ("BRG", "BRG"), ("BGR", "BGR"),
+                          ("rgb", "RGB"), ("bgr", "BGR"),
+                          ("RGBX", None), ("RG", None), (" RGB", None),
+                          ("", None), ("1GB", None)):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_script(["order " + feed(value)]),
+                                 ["order ok %s" % ok] if ok else ["order error"])
 
     # --- S8: the /config route contract --------------------------------------
 
@@ -186,8 +199,8 @@ class SettingsTests(unittest.TestCase):
 
     # --- S8: the page --------------------------------------------------------
 
-    def test_page_offers_every_allowed_brightness_and_both_clocks(self):
-        out = self.run_script(["page 30 24h -"])[0]
+    def test_page_offers_every_allowed_brightness_both_clocks_and_all_orders(self):
+        out = self.run_script(["page 30 24h RGB -"])[0]
         self.assertIn('action="/config"', out)
         self.assertIn('method="POST"', out)
         for percent in range(10, 81, 5):
@@ -196,13 +209,24 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn('value="10" selected', out)
         self.assertIn('value="24h" selected', out)
         self.assertIn('value="12h">', out)
-        self.assertIn("no restart", out)
+        # The panel channel order (S7): all six named permutations, the
+        # current one preselected, with the restart rule stated plainly.
+        self.assertIn('name="order"', out)
+        for name in ("RGB", "RBG", "GRB", "GBR", "BRG", "BGR"):
+            self.assertIn(f'value="{name}"', out)
+        self.assertIn('value="RGB" selected', out)
+        self.assertNotIn('value="BGR" selected', out)
+        self.assertIn('RGB (default)', out)
+        self.assertIn("restarts", out)
+        self.assertIn("construction", out)
 
     def test_page_preselects_the_current_values_and_escapes_the_error(self):
-        out = self.run_script(["page 65 12h " + feed("<x>&")])[0]
+        out = self.run_script(["page 65 12h BRG " + feed("<x>&")])[0]
         self.assertIn('value="65" selected', out)
         self.assertIn('value="12h" selected', out)
         self.assertIn('value="24h">', out)
+        self.assertIn('value="BRG" selected', out)
+        self.assertIn('value="RGB">', out)
         self.assertIn('&lt;x&gt;&amp;', out)
 
     def test_saved_page_says_settings_apply_without_a_restart(self):
@@ -211,67 +235,108 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("no restart", out)
         self.assertIn('href="/config"', out)
 
+    def test_saved_page_announces_the_order_restart_when_it_changed(self):
+        out = self.run_script(["saved restart"])[0]
+        self.assertIn("restarts", out)
+        self.assertIn("construction", out)
+        self.assertIn('href="/config"', out)
+        self.assertNotIn("no restart needed", out)
+
     # --- S9/S10 persistence transaction (verified commit + verified rollback) -
 
-    def run_store(self, present, fail, percent=80, code=1):
-        return self.run_script([f"store {present} {fail} {percent} {code}"])[0]
+    def run_store(self, present, fail, percent=80, code=1, order=0):
+        return self.run_script([f"store {present} {fail} {percent} {code} {order}"])[0]
 
-    def test_store_success_persists_both_values(self):
-        # Fresh namespace: both keys are written, each verified by read-back.
-        self.assertEqual(self.run_store(3, 0), "store ok b=80 c=1")
+    def test_store_success_persists_all_three_values(self):
+        # Fresh namespace: every key is written, each verified by read-back.
+        self.assertEqual(self.run_store(7, 0, 45, 1, 3), "store ok b=45 c=1 o=3")
+        # The default offered order (0 = RGB) round-trips; zero is a valid
+        # stored code, neither a put result of zero nor a read-back of zero
+        # may be mistaken for a failure.
+        self.assertEqual(self.run_store(7, 0, 25, 0, 0), "store ok b=25 c=0 o=0")
 
-    def test_the_h24_code_zero_round_trips(self):
-        # Zero is a valid stored code and the H24 default; neither a put
-        # result of zero nor a read-back of zero may be mistaken for a
-        # failure.
-        self.assertEqual(self.run_store(3, 0, 25, 0), "store ok b=25 c=0")
-
-    def test_failed_commit_restores_the_exact_previous_pair(self):
-        # The transaction: initial (30, H24), offered (80, H12); the second
-        # (clockformat) commit write cannot be persisted. Every commit is
-        # decided by its read-back, so the failure is detected, the rollback
-        # restores both keys with verified read-backs and the call reports
-        # failure while the stored pair is EXACTLY (30, H24).
-        self.assertEqual(self.run_store(3, 0b10), "store fail b=30 c=0")
+    def test_failed_commit_restores_the_exact_previous_triple(self):
+        # The transaction: initial (30, H24), offered (80, H12); the
+        # clockformat commit write cannot be persisted (key c bit 0). Every
+        # commit is decided by its read-back, so the failure is detected, the
+        # rollback restores all three keys with verified read-backs and the
+        # call reports failure while the stored triple is EXACTLY the
+        # snapshot: brightness 30, clockformat 0 and the rgborder key
+        # faithfully absent again.
+        self.assertEqual(self.run_store(3, 16), "store fail b=30 c=0 o=-")
 
     def test_failed_restore_stays_unverified_and_never_applies(self):
         # The clockformat commit failed and the BRIGHTNESS rollback write
-        # itself cannot be persisted: the result stays unverified (the
-        # stored state is visibly mixed — brightness still holds the offered
-        # 80) and such an outcome must never be reported as success, which is
-        # what keeps the live state untouched (pinned structurally below).
-        self.assertEqual(self.run_store(3, 0b10010), "store fail b=80 c=0")
+        # itself cannot be persisted (key b bit 2): the result stays
+        # unverified (the stored state is visibly mixed — brightness still
+        # holds the offered 80) and such an outcome must never be reported as
+        # success, which is what keeps the live state untouched (pinned
+        # structurally below).
+        self.assertEqual(self.run_store(3, 20), "store fail b=80 c=0 o=-")
 
     def test_rollback_removes_freshly_created_keys(self):
         # Nothing was stored before: a failed commit must leave the
         # namespace exactly as it was — empty, not a lone written value.
-        self.assertEqual(self.run_store(0, 0b10), "store fail b=- c=-")
+        self.assertEqual(self.run_store(0, 16), "store fail b=- c=- o=-")
 
     def test_a_lying_commit_write_is_caught_by_read_back(self):
-        # The commit write persists a DIFFERENT byte and answers as if fine:
-        # only the read-back decides, the rollback follows, the result is
-        # failure with the exact previous pair.
-        self.assertEqual(self.run_store(3, 0b1000), "store fail b=30 c=0")
+        # The clockformat commit write persists a DIFFERENT byte and answers
+        # as if fine (key c bit 1): only the read-back decides, the rollback
+        # follows, the result is failure with the exact previous triple.
+        self.assertEqual(self.run_store(3, 32), "store fail b=30 c=0 o=-")
 
     def test_a_lying_restore_write_is_caught_by_read_back(self):
         # Same discipline on the rollback: a restore that persists another
         # byte is detected and the outcome stays unverified.
-        self.assertEqual(self.run_store(3, 0b1000010), "store fail b=31 c=0")
+        self.assertEqual(self.run_store(3, 24), "store fail b=31 c=0 o=-")
 
-    def test_rollback_both_writes_run_even_after_an_earlier_failure(self):
+    def test_rollback_all_writes_run_even_after_an_earlier_failure(self):
         # Every restore is attempted even when an earlier one cannot be
         # verified: the clockformat key is still restored here even though
         # the brightness rollback lied.
-        self.assertEqual(self.run_store(3, 0b1000011), "store fail b=31 c=0")
+        self.assertEqual(self.run_store(3, 25), "store fail b=31 c=0 o=-")
 
     def test_rollback_removal_that_does_not_take_effect_stays_unverified(self):
-        # The test gap the verifier named: with NOTHING stored before, the
-        # commit of the clockformat key cannot be persisted and the rollback
-        # must remove the freshly created brightness key; when that removal
-        # does not take effect (fail bit 8: the fake store keeps the key),
-        # the rollback cannot be verified and the transaction reports
-        # failure (unverified), never success.
-        self.assertEqual(self.run_store(0, 0b100000010), "store fail b=80 c=-")
+        # With NOTHING stored before, the commit of the clockformat key
+        # cannot be persisted and the rollback must remove the freshly
+        # created brightness key; when that removal does not take effect
+        # (removal-b bit), the rollback cannot be verified and the
+        # transaction reports failure (unverified), never success.
+        self.assertEqual(self.run_store(0, 4112), "store fail b=80 c=- o=-")
+
+    # --- the order key inside the same transaction (S7 on the LAN page) ---
+
+    def test_order_commit_failure_restores_the_exact_previous_triple(self):
+        # rgborder stored as 5 (BGR) up front; the ORDER commit write cannot
+        # be persisted (key o bit 0): the failure is caught by read-back and
+        # every key — including the failing one — is restored and verified.
+        self.assertEqual(self.run_store(7, 256, 80, 1, 0), "store fail b=30 c=0 o=5")
+
+    def test_order_commit_failure_restores_the_absent_key(self):
+        # The order key was NOT stored before; the rgborder commit cannot be
+        # persisted; the rollback removes it again so the namespace ends
+        # exactly as it began (absence fidelity for the third key too).
+        self.assertEqual(self.run_store(3, 256, 80, 1, 4), "store fail b=30 c=0 o=-")
+
+    def test_order_rollback_failure_stays_unverified_and_never_applies(self):
+        # The clockformat commit cannot be persisted AND the ORDER restore
+        # write itself cannot be persisted (key o bit 2): the offered order
+        # stays stored (visibly mixed) and the transaction reports failure,
+        # never success.
+        self.assertEqual(self.run_store(7, 1040, 80, 1, 0), "store fail b=30 c=0 o=0")
+
+    def test_a_lying_order_restore_is_caught_by_read_back(self):
+        # The order restore persists a different byte (key o bit 3): the
+        # result stays unverified with the lying byte visible.
+        self.assertEqual(self.run_store(7, 2064, 80, 1, 0), "store fail b=30 c=0 o=4")
+
+    def test_order_removal_that_does_not_take_effect_stays_unverified(self):
+        # The order key was NOT stored before; the clockformat commit cannot
+        # be persisted; the rollback must remove the freshly created rgborder
+        # key; when that removal does not take effect (removal-o bit) the
+        # rollback cannot be verified and the transaction reports failure
+        # (unverified), never success — the restored snapshots stay visible.
+        self.assertEqual(self.run_store(3, 16400, 80, 1, 0), "store fail b=30 c=0 o=0")
 
 
 class ConfigWiringTests(unittest.TestCase):
@@ -359,6 +424,7 @@ class ConfigWiringTests(unittest.TestCase):
         reset = (ROOT / "include/wifi_credentials_reset.h").read_text()
         self.assertNotIn('"brightness"', reset)
         self.assertNotIn('"clockformat"', reset)
+        self.assertNotIn('"rgborder"', reset)
         # Every drawing consumer still scales through the one helper.
         self.assertEqual(source.count("panel::color("), 5)
         self.assertIn("panel::color(",
@@ -376,15 +442,32 @@ class ConfigWiringTests(unittest.TestCase):
         pre = body.split("if (storePanelSettings", 1)[0]
         self.assertNotIn("panel::setBrightnessPercent(", pre)
         self.assertNotIn("clockFormat =", pre)
+        # The board only ever restarts for an ACTUAL change of the channel
+        # order; a rejected value, a malformed body or an unverified store
+        # must not even reach the store.
+        self.assertNotIn("ESP.restart", pre)
+        self.assertLess(body.index('"Unknown colour order."'),
+                        body.index("if (storePanelSettings"))
         applied = body.split(
-            "if (storePanelSettings(brightness.percent, clock.format)) {", 1)[1]
+            "if (storePanelSettings(brightness.percent, clock.format, order.value)) {",
+            1)[1]
         applied = applied[:applied.index("\n  }")]
         for wired in ("panel::setBrightnessPercent(",
                       "clockFormat = clock.format;", "presentDisplay();"):
             self.assertIn(wired, applied)
-        # The store itself is the host-tested transaction, adapted onto
-        # Preferences with absence-distinguishing reads and no trusted put.
-        self.assertIn("panel_settings::storeSettings(store, percent, clock)",
+        # Restart only when the order value actually changed: the driver
+        # fixes the pins at construction, so the board reboots to apply it —
+        # and never otherwise.
+        self.assertIn("order.value != channelOrder", applied)
+        self.assertIn("configSavedPage(true)", applied)
+        self.assertIn("ESP.restart()", applied)
+        self.assertEqual(applied.count("ESP.restart()"), 1)
+        # The success page for an unchanged order must not mention a restart.
+        self.assertIn("configSavedPage()", applied)
+        # The store itself is the host-tested three-key transaction, adapted
+        # onto Preferences with absence-distinguishing reads and no trusted
+        # put.
+        self.assertIn("panel_settings::storeSettings(store, percent, clock, order)",
                       source)
         self.assertIn("panel_settings::SettingsStore", source)
         self.assertIn("preferences_.getUChar(key, 255)", source)

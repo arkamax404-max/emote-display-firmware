@@ -236,8 +236,10 @@ Once the board is connected to its network, the **station HTTP server** (the
 receiver's own server, hosting `/emote` and `/health`) also serves a
 **settings page** at `http://<panel-ip>/config` (also
 `gentle-matrix.local/config` over mDNS), **open on the local network without
-authentication**, like every other route of that server. It offers exactly
-two settings and **neither needs a restart to take effect** (S8):
+authentication**, like every other route of that server. It offers three settings —
+brightness, clock format and the S7 panel channel order. Brightness and clock
+format need no restart to take effect; a changed channel order does (the
+display driver fixes its pins at construction) (S8):
 
 - **Brightness (S10)**: percent from **10 to 80 in steps of 5**, default
   **30 %**. A runtime value applied through ONE setter; every drawing layer
@@ -257,6 +259,17 @@ two settings and **neither needs a restart to take effect** (S8):
   timing are unchanged. Persisted as a small code (0 = 24 h, 1 = 12 h) in
   `gentle`/`clockformat` with the same read-back verification; an invalid
   code falls back to 24 h.
+- **Panel colour order (S7)**: a dropdown with the six named permutations —
+  `RGB` (default), `RBG`, `GRB`, `GBR`, `BRG` and `BGR` — preselected to the
+  value the board is lighting right now; the submitted name is reviewed with
+  the shared case-insensitive parse, so an unknown or missing value is
+  rejected with the page and the reason, changing nothing. Changing the
+  order **restarts the board**, and the page says plainly why: the display
+  driver fixes its pins at construction, so the saved order applies when
+  the panel is rebuilt at the restart. Re-saving the value the board
+  already uses never restarts. The order is a property of the panel, while
+  brightness and clock format belong to the board: moving a board to a
+  panel with different wiring needs no cable or USB console any more.
 
 Contract of the two routes, decided on the exact first request line
 (`GET /config HTTP/1.1|1.0`, `POST /config HTTP/1.1|1.0`) **before** the
@@ -267,34 +280,42 @@ receiver protocol parser runs, so the receiver's routes and the unknown-path
   preselected.
 - `POST /config` → an `application/x-www-form-urlencoded` body (≤ 255 bytes,
   inside the one-client 2.5 s serving limits) with exactly the keys
-  `brightness` (decimal percent of the allowed set) and `clock` (`24h` or
-  `12h`), each at most once, no unknown keys; the shared portal URL rules
+  `brightness` (decimal percent of the allowed set), `clock` (`24h` or
+  `12h`) and `order` (one of the six names, case-insensitive), each at most
+  once, no unknown keys; the shared portal URL rules
   apply (`+` is a space, `%XX` requires two hex digits, bare control bytes
   rejected). A rejected value or malformed body re-renders the page with the
-  escaped reason (400) and changes nothing; an accepted pair is persisted
-  through the verified transaction (`panel_settings::storeSettings`: every
-  commit and rollback write is decided by read-back, a store that cannot be
-  verified — including one whose rollback write itself fails — stays
-  unverified and answers 500 without applying) and applied immediately (200
-  success page, "no restart needed"). Missing `Content-Length` → 411, empty
+  escaped reason (400) and changes nothing; an accepted triple is persisted
+  through the verified transaction (`panel_settings::storeSettings` across
+  the three keys `brightness`, `clockformat` and `rgborder`: every commit
+  and rollback write — including the failing key's own — is decided by
+  read-back, a store that cannot be verified — including one whose rollback
+  write itself fails — stays unverified and answers 500 without applying) and
+  applied immediately, with one repaint; when the order value actually
+  changed, the board saves it and restarts right after the success page has
+  been served (only then — an unchanged order answers the usual "no restart
+  needed" page). Missing
+  `Content-Length` → 411, empty
   body → 400, oversized body → 413. The `Content-Length` is parsed from the
   complete header block (after `\r\n\r\n`), never from the first request
   line alone.
-- The two new keys are NOT in the DOWN-reset scope (the 5-second hold still
-  erases exactly `ssid`/`password`/`updir`); the brightness percent and the
-  clock format survive it.
-- The AP portal page does **not** expose these two settings: the task allowed
-  it ("may"), but they are usable as soon as the board has LAN reachability,
-  and keeping the hand-written portal server's route set unchanged was the
-  lower-risk choice. USB provisioning and the portal remain the credential
-  routes.
+- The three new keys are NOT in the DOWN-reset scope (the 5-second hold
+  still erases exactly `ssid`/`password`/`updir`); the brightness percent,
+  the clock format and the channel order survive it.
+- The AP portal page keeps its own colour-order form (`POST /rgborder`, S7
+  unchanged) and does **not** expose the brightness/clock settings: the task
+  allowed it ("may"), but they are usable as soon as the board has LAN
+  reachability, and keeping the hand-written portal server's route set
+  unchanged was the lower-risk choice. USB provisioning and the portal
+  remain the credential routes.
 
 Host verification: pure parsing/rendering/rules in `include/panel_settings.h`
 through `tests/settings_test.cpp` + `tests/test_settings.py`, brightness
 value rules in `tests/display_settings_test.cpp`, 12/24 h geometry in
 `tests/idle_clock_test.cpp`, and structural wiring pins in
 `tests/test_settings.py`. Still unverified on hardware: the visual effect of
-the brightness steps and of the 12 h AM/PM placement on the real panel.
+the brightness steps and of the 12 h AM/PM placement on the real panel, and
+the restart-then-recolour flow after an actual order change on `/config`.
 
 ## Residual risk: the passphrase crosses the air in the clear
 

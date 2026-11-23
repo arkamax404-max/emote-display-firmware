@@ -43,7 +43,7 @@ static uint8_t addrPins[] = {45, 36, 48, 35, 21};
 // `matrix` reference keeps every call site below unchanged.
 alignas(Adafruit_Protomatter) static uint8_t panelStorage[sizeof(Adafruit_Protomatter)];
 static Adafruit_Protomatter &matrix = *reinterpret_cast<Adafruit_Protomatter *>(panelStorage);
-static rgb_order::Order channelOrder = rgb_order::Order::RGB; // applied before construction, rendered in the portal selector
+static rgb_order::Order channelOrder = rgb_order::Order::RGB; // applied before construction, rendered in the LAN settings page and the portal selector
 static FrameDecoder frameDecoder;
 static Adafruit_LIS3DH accelerometer;
 static Orientation orientation;
@@ -171,13 +171,15 @@ static bool storeRgbOrder(rgb_order::Order order) {
 // defaulting to the untouched 24 h.
 static idle_clock::ClockFormat clockFormat = idle_clock::ClockFormat::H24;
 
-// S9/S10 settings persistence: both live in the `gentle` namespace under
-// their own keys (`brightness`, the percent byte; `clockformat`, the format
-// code). The commit/rollback/verification rules live in the host-tested
-// panel_settings::storeSettings transaction; the firmware only adapts an
-// open Preferences namespace onto it. Neither key is in the DOWN-reset
-// scope (wifi_reset erases exactly ssid/password/updir). An absent or
-// out-of-range stored value falls back to the defaults (30 %, 24 h).
+// S7/S9/S10 settings persistence: all three live in the `gentle` namespace
+// under their own keys (`brightness`, the percent byte; `clockformat`, the
+// format code; `rgborder`, the order code 0-5). The commit/rollback/
+// verification rules live in the host-tested panel_settings::storeSettings
+// transaction, which now spans the THREE keys as one atomic triple; the
+// firmware only adapts an open Preferences namespace onto it. No key is in
+// the DOWN-reset scope (wifi_reset erases exactly ssid/password/updir). An
+// absent or out-of-range stored value falls back to the defaults (30 %, 24 h,
+// RGB — the order decode happens in setup(), before the panel exists).
 class ProvisionedSettingsStore : public panel_settings::SettingsStore {
  public:
   explicit ProvisionedSettingsStore(Preferences &prefs) : preferences_(prefs) {}
@@ -200,10 +202,11 @@ class ProvisionedSettingsStore : public panel_settings::SettingsStore {
   Preferences &preferences_;
 };
 
-static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock) {
+static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock,
+                               rgb_order::Order order) {
   if (!preferences.begin("gentle", false)) return false;
   static ProvisionedSettingsStore store(preferences);
-  const bool verified = panel_settings::storeSettings(store, percent, clock);
+  const bool verified = panel_settings::storeSettings(store, percent, clock, order);
   preferences.end();
   return verified;
 }
@@ -885,14 +888,18 @@ static void replyHtml(int code, const std::string &body) {
 // The settings page with the live values: one render helper for the GET
 // reply and for every POST rejection.
 static std::string configPageWithError(const std::string &error) {
-  return panel_settings::configPage(panel::brightnessPercent(), clockFormat, error);
+  return panel_settings::configPage(panel::brightnessPercent(), clockFormat,
+                                    channelOrder, error);
 }
 
 // POST /config application: parse + review, then persist (read-back
 // verified, rollback discipline like the credential store), then apply
 // live. A rejected value or a malformed body re-renders the page with the
 // reason and changes nothing; the runtime state only moves after the store
-// verified. Neither setting needs a restart to take effect.
+// verified. Brightness and clock format apply immediately; the channel
+// order takes effect only through a restart, and ONLY when the value
+// actually changed — the driver fixes the pins at construction, so saving
+// the same value again must not reboot the board.
 static void applyConfigSave() {
   const panel_settings::SettingsFields fields =
       panel_settings::parseSettingsForm(configBody.data(), configBody.size());
@@ -900,19 +907,28 @@ static void applyConfigSave() {
       panel_settings::reviewBrightness(fields.brightness);
   const panel_settings::ClockChoice clock =
       panel_settings::reviewClock(fields.clock);
+  const panel_settings::OrderChoice order =
+      panel_settings::reviewOrder(fields.order);
   const char *error = !fields.ok
       ? "Malformed form data. Reload the page and try again."
       : !brightness.ok ? "Unknown brightness value."
       : !clock.ok ? "Unknown clock format."
+      : !order.ok ? "Unknown colour order."
       : nullptr;
   if (error) {
     replyHtml(400, configPageWithError(error));
     return;
   }
-  if (storePanelSettings(brightness.percent, clock.format)) {
+  if (storePanelSettings(brightness.percent, clock.format, order.value)) {
     panel::setBrightnessPercent(brightness.percent);
     clockFormat = clock.format;
     presentDisplay(); // live application: this frame already uses the values
+    if (order.value != channelOrder) {
+      replyHtml(200, panel_settings::configSavedPage(true));
+      delay(100); // let the small success page drain, exactly like the portal
+      ESP.restart();
+      return;
+    }
     replyHtml(200, panel_settings::configSavedPage());
     return;
   }
