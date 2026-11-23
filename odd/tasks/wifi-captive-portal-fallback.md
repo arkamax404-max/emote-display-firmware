@@ -1,0 +1,42 @@
+# Wi-Fi captive portal fallback
+
+Feature: when the board cannot join its saved Wi-Fi, it must offer an open SoftAP with a captive portal to configure the network — but only when the board is not attached to a computer over USB. Firmware only; platformio Arduino-ESP32 2.0.17 on Adafruit MatrixPortal ESP32-S3.
+
+## Specs
+
+S1. Objective, from the user (verbatim): "antes de copiarle el firmware quiero que incorporemos la funcionalidad para que en caso de que no se pueda conectar al wifi la placa se ponga en modo AP con un portal al que conectarnos y configurarle le conexion wifi, pero siempre y cuando no estemos conectados por USB a un ordenador"
+
+S2. Trigger: "Al arrancar, tras agotar los reintentos" — "Solo en el arranque: intenta conectar a la Wi-Fi guardada y, si falla tras N intentos, abre el AP. Si la red cae en marcha, sigue reintentando y el portal no aparece hasta el próximo reinicio. Es lo más predecible y no interrumpe el reloj ni el display."
+
+S3. AP security, corrected by the user: "coreccion, para conectarse al portal mostraremos la pass en el panel la cual sera aleatoria de los caractereses minimos exigidos" — the AP is WPA2-protected with a random password generated at boot, exactly at the minimum length WPA2 requires, and that password is shown on the LED panel so anyone standing at the board can join. This supersedes the earlier open-AP choice.
+
+S4. After submitting the form: "Validar antes de guardar y reiniciar" — "Prueba la conexión antes de persistir: si no conecta no se guarda y la página muestra el error. Evita dejar la placa inaccesible con una contraseña mala."
+
+## Implementation decisions
+
+- USB gate. "Conectado por USB a un ordenador" means the device is enumerated by a USB host, tested with `tud_mounted()` from TinyUSB (`usbd.h:75`), not `Serial`/`USBCDC::operator bool()`, which only turns true when a host application has DTR+RTS asserted and would therefore claim a charger or a closed terminal is a computer. The gate is evaluated once when the portal decision is taken; a USB host appearing later does not retroactively cancel a portal already announced.
+- Retry policy. A saved network gets 4 connection attempts of 10 s each, separated by 5 s pauses (`4 x 10 s + 3 x 5 s = 55 s` worst case) before the portal is offered. This replaces the current unbounded 15 s reconnect loop only during boot; once connected, a later link loss keeps today's `pollWifi` behaviour and never opens the portal.
+- Missing credentials. With no `ssid` stored there are no attempts to exhaust: the portal opens when no USB host is enumerated, and the existing `SET WIFI / VIA USB` message plus serial provisioning stays authoritative when a USB host is present.
+- Portal surface. WPA2 SoftAP `gentle-matrix` (`192.168.4.1`, channel 1, max 4 clients) plus a `DNSServer` answering every query with the AP address, so the OS captive-portal detection fires. A dedicated `WiFiServer portalServer(80)` serves the page and must never be begun while the station server is up, and vice versa; the station `WiFiServer server(80)` and mDNS stay untouched otherwise.
+- AP password. Generated once when the portal opens, never stored (a fresh one every boot, so nothing secret lives in NVS): exactly 8 characters, the WPA2 PSK minimum, drawn with `esp_random()` from an alphabet restricted to glyphs the panel font can actually draw, excluding visually confusable pairs (`0`/`O`, `1`/`I`/`L`). The portal screen shows it through the existing `displayMessage` path, so the user reads it off the panel and types it on the phone; the password is never echoed into the HTML page, never logged, and never exposed in `/health`.
+- Page. `GET` any path returns the form page (200 HTML) so probe URLs land on it; `POST /save` takes `ssid` and `password`, mirroring the serial rules (SSID 1-32 bytes, password 8-63 bytes or empty). Errors re-render the page with the reason.
+- Validation before persist. `POST /save` switches to `WIFI_AP_STA`, calls `WiFi.begin` with the offered values, waits up to 20 s for `WL_CONNECTED`; on success it writes `ssid`/`password` to the `gentle` namespace with the same read-back verification the serial hook uses, replies with a success page and restarts; on failure it disconnects the station, returns to AP-only, keeps the stored credentials untouched and re-renders the page with the error.
+- Secret handling. The offered passphrase is never logged, never echoed into HTML and never shown on the panel; the buffers holding it are zeroed after the attempt. Nothing about it is exposed in `/health`.
+- Panel and diagnostics. Portal mode shows the AP name and the generated password through the existing `displayMessage` path; the serial diagnostic overlay keeps its pinned 10 pixels and the Wi-Fi info overlay keeps its priority. No new serial console command is introduced and `pollProvisioning` remains the only reader of `Serial`.
+
+## Tasks
+
+T1 | S1,S2 | pending | USB-attachment gate and bounded boot-time retry policy as pure logic with host tests: portal is attempted only when the board is not enumerated by a USB host and the saved-network attempts are exhausted.
+T2 | S1,S3 | pending | SoftAP with captive portal: DNS responder plus configuration page, WPA2 with a random 8-character password shown on the panel, isolated from the station interface and from the existing HTTP routes.
+T3 | S4 | pending | Validate credentials against the real network before persisting; on failure keep the portal open and show the error; on success save and reboot.
+T4 | S1,S3,S4 | pending | Display and diagnostics integration: what the panel shows in portal mode, portal identity in the diagnostics/health surface, no regression of clock, PNG reception, sessions or serial transport.
+T5 | S1-S4 | pending | Documentation: README and provisioning docs cover the portal, the USB condition, the generated-password policy and where it is shown, and recovery.
+T6 | S1-S4 | blocked | Build, emit the UF2 and copy it to the new board's MATRXS3BOOT volume. Waits on T1-T5 and on an explicit device-write authorization for this candidate.
+
+## Log
+
+L1. User request (verbatim): "antes de copiarle el firmware quiero que incorporemos la funcionalidad para que en caso de que no se pueda conectar al wifi la placa se ponga en modo AP con un portal al que conectarnos y configurarle le conexion wifi, pero siempre y cuando no estemos conectados por USB a un ordenador"
+L2. Product decisions taken by the user in this session, recorded before implementation: AP only at boot after exhausting retries (S2), open AP without a password at that time (superseded by L4), validate before persisting and then reboot (S4).
+L3. Read-only explorer map (`mwth3i71-1-ibbc`), evidence that shaped the design: `setup()` at `src/main.cpp:508-545` never calls `WiFi.begin` when no credentials are stored and `pollWifi()` `:483-505` has no connect timeout, retrying `WiFi.reconnect()` every 15 s with the panel stuck on `WIFI / CONNECT`; the only finite-state logic lives in `main.cpp` and is not host-testable. `presentDisplay()` `:167-175` is the sole flush path, so a portal banner must not disturb the staged frame or the pinned 10-pixel `serialDiag` overlay. Provisioning is `serial::ProvisionConsole` (`include/serial_ingress.h:42-124`) over `Preferences` `gentle`/`ssid`/`password`; `pollProvisioning` `:384-411` is the only `Serial` reader. There is no SoftAP, DNS or portal code anywhere. USB detection: `Serial` is TinyUSB `USBCDC` (`ARDUINO_USB_CDC_ON_BOOT=1`, no `ARDUINO_USB_MODE`) whose `operator bool()` is true only with DTR+RTS, while `tud_mounted()` is the real bus-enumeration signal, which is what S1 asks for.
+L4. User correction (verbatim): "coreccion, para conectarse al portal mostraremos la pass en el panel la cual sera aleatoria de los caractereses minimos exigidos". S3 rewritten: WPA2 AP with a random 8-character password (WPA2 minimum) generated at boot and displayed on the panel, replacing the earlier open-AP choice. The password is per boot and never persisted, so no new secret is added to NVS. Consequence accepted: the password is readable by anyone who can see the panel, which is the intended tradeoff; the home-network passphrase offered through the portal keeps the stronger handling (never shown, never logged, zeroed after use).
+
