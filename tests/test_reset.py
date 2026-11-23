@@ -14,10 +14,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEBOUNCE_MS = 50
 HOLD_MS = 5000
 
-# Fixed fake-store values (byte-identical restore assertions).
+# Fixed fake-store values (byte-identical restore assertions). `updir` is
+# the unsigned byte it actually is (Preferences getUChar/putUChar), so the
+# fake store represents it typed and its spec is shown in decimal — the
+# defect under test restored it as an empty string instead.
 SSID_VALUE = "my ssid"
 PASSWORD_VALUE = "p4ssw0rd!"
-UPDIR_VALUE = "/icons/sub"
+UPDIR_VALUE = 3
 BRIGHTNESS_VALUE = "16"
 
 
@@ -186,15 +189,15 @@ class HoldResetTests(unittest.TestCase):
 
     # --- T8: verified erase scope ------------------------------------------------
 
-    def erase_keys(self, present, fail=0):
+    def erase_keys(self, present, fail=0, failwrite=0):
         # The `erase` result line only; use erase_and_dump for value-level
         # assertions.
-        return self.run_script(["erase %d %d" % (present, fail)],
+        return self.run_script(["erase %d %d %d" % (present, fail, failwrite)],
                                mode="erase")[:1]
 
-    def erase_and_dump(self, present, fail=0):
-        return self.run_script(["erase %d %d" % (present, fail), "dump"],
-                               mode="erase")
+    def erase_and_dump(self, present, fail=0, failwrite=0):
+        return self.run_script(["erase %d %d %d" % (present, fail, failwrite),
+                                "dump"], mode="erase")
 
     def test_erase_removes_exactly_ssid_password_updir(self):
         # brightness (bit 3) is out of scope: it must survive untouched.
@@ -222,14 +225,63 @@ class HoldResetTests(unittest.TestCase):
     def test_failed_password_removal_restores_original_values_exactly(self):
         # The documented invariant: a failed erase leaves the stored
         # configuration exactly as it was. Values are snapshotted before
-        # mutating and the keys already removed are written back.
+        # mutating and the keys already removed are written back — `updir`
+        # as the same unsigned byte it was before, never an empty value.
         out = self.erase_and_dump(15, fail=2)  # password (bit1) removal fails
         self.assertEqual(out[0], "erase unverified left=15")
         self.assertEqual(
             out[1],
-            "dump ssid=%s password=%s updir=%s brightness=%s" % (
+            "dump ssid=%s password=%s updir=%d brightness=%s" % (
                 _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
-                _hexspec(UPDIR_VALUE), _hexspec(BRIGHTNESS_VALUE)))
+                UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
+
+    def test_failed_updir_removal_restores_the_same_byte(self):
+        # Defect under test: `updir` is a Preferences unsigned byte, so a
+        # failed removal must round-trip the stored byte through the typed
+        # accessors — the value afterwards is the same byte it was before,
+        # not an empty string (what getString/putString would restore).
+        out = self.erase_and_dump(15, fail=4)  # updir (bit2) removal fails
+        self.assertEqual(out[0], "erase unverified left=15")
+        self.assertEqual(
+            out[1],
+            "dump ssid=%s password=%s updir=%d brightness=%s" % (
+                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+                UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
+
+    def test_updir_absent_is_distinguishable_in_the_typed_store(self):
+        # The typed contract (readUChar false = absent) keeps an absent key
+        # distinct from any stored byte: a verified erase leaves updir
+        # reported absent, and a present byte 3 reports 3, never "-".
+        out = self.run_script(["erase 15 0", "dump"], mode="erase")
+        self.assertEqual(out[1],
+                         "dump ssid=- password=- updir=- brightness=%s"
+                         % _hexspec(BRIGHTNESS_VALUE))
+
+    def test_unverifiable_restore_write_reports_failure(self):
+        # A restore write that cannot be persisted must not be ignored: the
+        # erase reports failure (the caller then skips the restart), and the
+        # store keeps the keys the restore could not write back.
+        # ssid was removed, the password removal failed, and writing ssid
+        # back fails: overall "unverified", ssid stays absent.
+        out = self.erase_and_dump(15, fail=2, failwrite=1)
+        self.assertEqual(out[0], "erase unverified left=14")
+        self.assertEqual(
+            out[1],
+            "dump ssid=- password=%s updir=%d brightness=%s" % (
+                _hexspec(PASSWORD_VALUE), UPDIR_VALUE,
+                _hexspec(BRIGHTNESS_VALUE)))
+
+    def test_failed_updir_restore_write_reports_failure(self):
+        # Same contract for the typed byte: the updir removal failed and its
+        # restore write fails too — "unverified", and ssid/password stay
+        # restored byte-identically.
+        out = self.erase_and_dump(15, fail=4, failwrite=4)
+        self.assertEqual(out[0], "erase unverified left=15")
+        self.assertEqual(
+            out[1],
+            "dump ssid=%s password=%s updir=%d brightness=%s" % (
+                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+                UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
 
     def test_success_path_removes_exactly_the_three_keys(self):
         # The success path removes exactly ssid/password/updir with verified
@@ -274,6 +326,58 @@ class MainWiringStructuralTests(unittest.TestCase):
         gate = poll.index("if (clearProvisionedCredentials())")
         self.assertLess(poll.index("ESP.restart()", gate),
                         poll.index("could not be verified"))
+
+    def test_adapter_round_trips_updir_as_uchar(self):
+        # Defect 1 (this session): the adapter snapshotted/restored `updir`
+        # through getString/putString, so a failed-erase restore wrote back an
+        # empty string instead of the stored byte. `updir` is an unsigned
+        # byte everywhere else (setup() reads it with getUChar and
+        # pollOrientation writes it with putUChar); ssid and password stay
+        # strings.
+        adapter = self.source.split("class ProvisionedPrefs", 1)[1]
+        adapter = adapter[:adapter.index("\n};")]
+        self.assertIn('preferences_.getUChar("updir", 255)', adapter)
+        self.assertIn('preferences_.putUChar("updir", value)', adapter)
+        # The restore write of the byte is checked, not ignored.
+        self.assertIn('return preferences_.putUChar("updir", value) != 0;', adapter)
+        # ssid/password remain string-typed round-trips.
+        self.assertIn("preferences_.getString(", adapter)
+        self.assertIn("preferences_.putString(", adapter)
+
+
+class OrientationFirstPaintStructuralTests(unittest.TestCase):
+    """Delegated structural check (defect 2, this session): setup() paints the
+    first panel content (SET WIFI / VIA USB, and the portal slides when the
+    portal opens with no credentials) before the first accelerometer sample,
+    so that first paint always uses rotation 0 and can stay visibly rotated
+    until an unrelated redraw — up to 5 s in the portal. pollOrientation must
+    repaint once on the first successful orientation sample, without waiting
+    for a content change. Secondary evidence only, like
+    MainWiringStructuralTests; presentDisplay() callers, the pinned 10-pixel
+    diagnostic overlay and the Wi-Fi info overlay stay untouched."""
+
+    def setUp(self):
+        self.source = (ROOT / "src/main.cpp").read_text()
+        poll = self.source.split("static void pollOrientation()", 1)[1]
+        self.poll = poll[:poll.index("\n}")]
+
+    def test_repaint_happens_on_the_first_successful_sample(self):
+        # The first-sample repaint is its own branch (not gated on `changed`)
+        # and runs after orientation.update, so it reflects the reference and
+        # rotation first known.
+        self.assertIn("if (changed)", self.poll)
+        branch = self.poll.split("else if (firstSample)", 1)[1]
+        branch = branch[:branch.index("\n  }")]
+        self.assertIn("presentDisplay()", branch)
+        self.assertLess(self.poll.index("orientation.update"),
+                        self.poll.index("else if (firstSample)"))
+
+    def test_first_sample_flag_survives_a_failed_getEvent(self):
+        # A failed accelerometer read is not a sample: the first repaint must
+        # still happen on the first successful one.
+        self.assertLess(
+            self.poll.index("if (!accelerometer.getEvent(&event)) return;"),
+            self.poll.index("firstSampleSeen = true;"))
 
 
 if __name__ == "__main__":

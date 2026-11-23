@@ -136,30 +136,44 @@ static bool storeCredentials(const char *newSsid, const char *newPassword) {
 static wifi_reset::HoldReset downHold;
 
 // Preferences adapter for the host-tested erase routine: the `gentle`
-// namespace is already open read-write when eraseCredentials runs. The
-// read/write operations serve the failure-restore path (values snapshotted
-// before mutating and written back byte-identically on an unverified erase)
-// and are restricted to exactly the three keys of the reset scope.
+// namespace is already open read-write when eraseCredentials runs. The typed
+// accessors serve the failure-restore path (values snapshotted before
+// mutating and written back byte-identically on an unverified erase) and are
+// restricted to exactly the keys of the reset scope, each with the type it
+// actually has: `ssid`/`password` are strings, `updir` is the unsigned byte
+// it actually is (preferences_.getUChar("updir")/preferences_.putUChar("updir"), matching setup()
+// and pollOrientation), so a restore never turns a stored byte into an
+// empty string.
 class ProvisionedPrefs : public wifi_reset::CredentialStore {
  public:
   explicit ProvisionedPrefs(Preferences &prefs) : preferences_(prefs) {}
   bool hasKey(const char *key) override { return preferences_.isKey(key); }
-  std::string readKey(const char *key) override {
-    if (!isResetKey(key)) return std::string();
-    return std::string(preferences_.getString(key, "").c_str());
+  void removeKey(const char *key) override { preferences_.remove(key); }
+  bool readString(const char *key, std::string &value) override {
+    if (!isStringResetKey(key)) return false;
+    value = std::string(preferences_.getString(key, "").c_str());
+    return true;
   }
-  bool writeKey(const char *key, const std::string &value) override {
-    if (!isResetKey(key)) return false;
+  bool writeString(const char *key, const std::string &value) override {
+    if (!isStringResetKey(key)) return false;
     return preferences_.putString(key, String(value.c_str())) != 0;
   }
-  void removeKey(const char *key) override { preferences_.remove(key); }
+  bool readUChar(const char *key, uint8_t &value) override {
+    if (std::strcmp(key, "updir") != 0) return false;
+    value = preferences_.getUChar("updir", 255); // 255 = absent, as setup() reads it
+    return true;
+  }
+  bool writeUChar(const char *key, uint8_t value) override {
+    if (std::strcmp(key, "updir") != 0) return false;
+    return preferences_.putUChar("updir", value) != 0;
+  }
 
  private:
-  // The reset scope (S6 decision) is fixed: `ssid`, `password` and `updir`.
-  static bool isResetKey(const char *key) {
+  // The reset scope (S6 decision) is fixed: `ssid`, `password` (strings)
+  // and `updir` (unsigned byte, always accessed as the literal "updir").
+  static bool isStringResetKey(const char *key) {
     return std::strcmp(key, "ssid") == 0 ||
-           std::strcmp(key, "password") == 0 ||
-           std::strcmp(key, "updir") == 0;
+           std::strcmp(key, "password") == 0;
   }
   Preferences &preferences_;
 };
@@ -645,10 +659,13 @@ static void resetOrientationReference() {
 
 static void pollOrientation() {
   static uint32_t lastSample = 0;
+  static bool firstSampleSeen = false;
   if (!accelerometerReady || millis() - lastSample < 50) return;
   lastSample = millis();
   sensors_event_t event;
   if (!accelerometer.getEvent(&event)) return;
+  const bool firstSample = !firstSampleSeen;
+  firstSampleSeen = true; // a failed getEvent is not a sample: try again later
   const int referenceBefore = orientation.reference();
   const bool changed = orientation.update(event.acceleration.x, event.acceleration.y, event.acceleration.z, lastSample);
   if (referenceBefore < 0 && orientation.reference() >= 0) {
@@ -661,6 +678,13 @@ static void pollOrientation() {
   if (changed) {
     presentDisplay(); // Works without receiving another HTTP frame.
     Serial.printf("ORIENT: rotation %u degrees\n", orientation.rotation() * 90);
+  } else if (firstSample) {
+    // setup() paints its first content (SET WIFI / VIA USB, and the portal
+    // slides when the portal opens with no credentials) before any sample,
+    // so that paint always used rotation 0; repaint once the orientation
+    // reference and rotation are first known, without waiting for a content
+    // change or disturbing any other drawing behaviour.
+    presentDisplay();
   }
 }
 

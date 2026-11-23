@@ -61,16 +61,25 @@ class HoldReset {
 
 // Storage interface of the verified erase (S6): the host tests inject a
 // fake; the firmware adapts an open Preferences `gentle` namespace onto it.
+// The contract is type-aware so each reset-scope key round-trips faithfully:
+// `ssid` and `password` are strings, and `updir` is the unsigned byte it
+// actually is (Preferences getUChar/putUChar) with the absent state kept
+// distinguishable from any stored value (including 0) — so a restore can
+// never replace a stored byte with an empty string. A restore write that
+// cannot be persisted is never ignored: every write-back verifies (write
+// result plus read-back) and any failed verification propagates.
 class CredentialStore {
  public:
   virtual ~CredentialStore() = default;
   virtual bool hasKey(const char *key) = 0;
-  // Byte-identical value access for the failure-restore path: readKey
-  // returns the stored value (an empty string when absent) and writeKey
-  // persists it again unchanged.
-  virtual std::string readKey(const char *key) = 0;
-  virtual bool writeKey(const char *key, const std::string &value) = 0;
   virtual void removeKey(const char *key) = 0;
+  // String-valued keys (`ssid`, `password`): false read = absent;
+  // false write = the value could not be persisted.
+  virtual bool readString(const char *key, std::string &value) = 0;
+  virtual bool writeString(const char *key, const std::string &value) = 0;
+  // Unsigned-byte-valued keys (`updir`): same semantics, typed.
+  virtual bool readUChar(const char *key, uint8_t &value) = 0;
+  virtual bool writeUChar(const char *key, uint8_t value) = 0;
 };
 
 // The user's reset scope (S6 decision): exactly `ssid`, `password` and
@@ -78,32 +87,73 @@ class CredentialStore {
 // value are untouched, and nothing is written outside that namespace.
 // Read-back verification: each existing key must report gone right after its
 // removal, and a failed removal must leave the stored configuration exactly
-// as it was — every value is snapshotted before mutating, and the keys
-// already removed are written back byte-identically before reporting
-// failure. Returns true only when the whole scope is verified removed (an
-// empty namespace qualifies); the caller restarts only on true.
+// as it was — every value is snapshotted before mutating through its typed
+// accessor (strings for `ssid`/`password`, the unsigned byte for `updir`),
+// the keys already removed are written back byte-identically with verified
+// read-backs, and a restore write that cannot be verified reports failure
+// (never silently ignored). Returns true only when the whole scope is
+// verified removed (an empty namespace qualifies); the caller restarts
+// only on true.
 inline bool eraseCredentials(CredentialStore &store) {
-  static const char *const kKeys[] = {"ssid", "password", "updir"};
-  const int kKeyCount = 3;
-  std::string snapshot[kKeyCount];
-  bool existed[kKeyCount] = {false, false, false};
-  for (int i = 0; i < kKeyCount; ++i) {
-    if (!store.hasKey(kKeys[i])) continue;
-    existed[i] = true;
-    snapshot[i] = store.readKey(kKeys[i]);
+  static const char *const kStringKeys[] = {"ssid", "password"};
+  const int kStringKeyCount = 2;
+  std::string stringSnapshot[kStringKeyCount];
+  bool stringExisted[kStringKeyCount] = {false, false};
+  bool updirExisted = store.hasKey("updir");
+  uint8_t updirSnapshot = 0;
+  for (int i = 0; i < kStringKeyCount; ++i) {
+    if (!store.hasKey(kStringKeys[i])) continue;
+    if (!store.readString(kStringKeys[i], stringSnapshot[i])) return false;
+    stringExisted[i] = true;
   }
-  for (int i = 0; i < kKeyCount; ++i) {
-    if (!existed[i]) continue;
-    store.removeKey(kKeys[i]);
-    if (store.hasKey(kKeys[i])) {
-      // The removal could not be verified: restore everything up to and
-      // including this key byte-identically, then report failure (the caller
-      // must not restart). Restoring the failing key too is harmless when it
-      // is still present and essential when the store removed it but the
-      // read-back lied.
-      for (int j = 0; j <= i; ++j) {
-        if (existed[j]) (void)store.writeKey(kKeys[j], snapshot[j]);
+  // Snapshot reads fail before any mutation, so nothing is destroyed.
+  if (updirExisted && !store.readUChar("updir", updirSnapshot)) return false;
+
+  // Writes every snapshot up to and including `last` back and verifies each
+  // one by read-back (attempting them all even when one verifies short, so
+  // the configuration is repaired as far as possible); false means at least
+  // one restore could not be confirmed.
+  auto restoreStrings = [&](int last) {
+    bool verified = true;
+    for (int j = 0; j <= last; ++j) {
+      if (!stringExisted[j]) continue;
+      if (!store.writeString(kStringKeys[j], stringSnapshot[j])) {
+        verified = false;
+        continue;
       }
+      std::string back;
+      if (!store.readString(kStringKeys[j], back) ||
+          back != stringSnapshot[j]) verified = false;
+    }
+    return verified;
+  };
+  auto restoreUChar = [&]() {
+    if (!store.writeUChar("updir", updirSnapshot)) return false;
+    uint8_t back = 0;
+    return store.readUChar("updir", back) && back == updirSnapshot;
+  };
+
+  for (int i = 0; i < kStringKeyCount; ++i) {
+    if (!stringExisted[i]) continue;
+    store.removeKey(kStringKeys[i]);
+    if (store.hasKey(kStringKeys[i])) {
+      // The removal could not be verified: restore the string keys up to and
+      // including this one byte-identically (updir has not been touched yet),
+      // then report failure (the caller must not restart). Restoring the
+      // failing key too is harmless when it is still present and essential
+      // when the store removed it but the read-back lied.
+      restoreStrings(i);
+      return false;
+    }
+  }
+  if (updirExisted) {
+    store.removeKey("updir");
+    if (store.hasKey("updir")) {
+      // Unverifiable byte removal: everything string-typed was already
+      // removed — restore the strings and the byte (each verified, failures
+      // reported), then report failure regardless: the erase is not verified.
+      restoreStrings(kStringKeyCount - 1);
+      restoreUChar();
       return false;
     }
   }
