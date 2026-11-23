@@ -264,6 +264,15 @@ class SettingsTests(unittest.TestCase):
         # the brightness rollback lied.
         self.assertEqual(self.run_store(3, 0b1000011), "store fail b=31 c=0")
 
+    def test_rollback_removal_that_does_not_take_effect_stays_unverified(self):
+        # The test gap the verifier named: with NOTHING stored before, the
+        # commit of the clockformat key cannot be persisted and the rollback
+        # must remove the freshly created brightness key; when that removal
+        # does not take effect (fail bit 8: the fake store keeps the key),
+        # the rollback cannot be verified and the transaction reports
+        # failure (unverified), never success.
+        self.assertEqual(self.run_store(0, 0b100000010), "store fail b=80 c=-")
+
 
 class ConfigWiringTests(unittest.TestCase):
     """Structural wiring pins over src/main.cpp only: no compilation, so a
@@ -296,6 +305,33 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertLess(firstLine, completion)
         self.assertLess(completion, dispatch)
         self.assertLess(dispatch, parse)
+
+    def test_stalled_config_request_times_out_with_the_settings_page(self):
+        # A stalled /config request must answer the re-rendered settings page
+        # with the reason (the settings-surface rejection rule), while every
+        # other request keeps the generic JSON timeout body and its exact
+        # current behaviour. Neither timeout path touches stored or live
+        # settings.
+        source = self.source()
+        poll = source.split("static void pollHttp() {", 1)[1]
+        poll = poll[:poll.index("\n}")]
+        branch = poll[poll.index("if (millis() - requestStarted > REQUEST_TIMEOUT_MS)"):]
+        branch = branch[:branch.index("return;")]
+        self.assertIn("if (configSurface)", branch)
+        self.assertIn(
+            'replyHtml(408, configPageWithError("Request timed out."))', branch)
+        self.assertIn('reply(408, "{\\\"error\\\":\\\"timeout\\\"}")', branch)
+        # The settings surface is marked at the first-line classification and
+        # cleared with the request state, so only classified /config requests
+        # ever take the HTML path.
+        classify = source.split("static bool handleConfigRequestLine() {", 1)[1]
+        classify = classify[:classify.index("\n}")]
+        self.assertLess(
+            classify.index("if (route == panel_settings::Route::Other)"),
+            classify.index("configSurface = true;"))
+        close = source.split("static void closeRequest() {", 1)[1]
+        close = close[:close.index("\n}")]
+        self.assertIn("configSurface = false;", close)
 
     def test_recorded_wiring_pins(self):
         # Secondary evidence only (the functional contracts drive the same

@@ -72,6 +72,11 @@ static bool configFirstLineChecked = false;
 // A first line classified as POST /config lingers until the complete header
 // block (see handleConfigRequestLine/beginConfigSave).
 static bool configSavePending = false;
+// The request belongs to the settings surface (`/config`): from the first-line
+// classification until the request closes. The timeout branch uses it to
+// re-render the settings page — the rejection rule of that surface — while
+// every other request keeps the generic JSON body.
+static bool configSurface = false;
 static std::string configBody;
 static size_t configBodyLength = 0;
 static uint32_t requestStarted = 0;
@@ -852,6 +857,7 @@ static void closeRequest() {
   request = receiver::Request{};
   configFirstLineChecked = false;
   configSavePending = false;
+  configSurface = false;
   configBody.clear();
   configBodyLength = 0;
 }
@@ -929,6 +935,7 @@ static bool handleConfigRequestLine() {
   const panel_settings::Route route =
       panel_settings::routeOf(headers.substr(0, headers.size() - 2));
   if (route == panel_settings::Route::Other) return false;
+  configSurface = true; // rejections of this surface re-render its page
   if (route == panel_settings::Route::Get) {
     // The page is open on the LAN by decision (no authentication) and never
     // scans: it renders from the live values only.
@@ -974,7 +981,14 @@ static void pollHttp() {
     requestStarted = millis();
     client.setTimeout(1); // Arduino-ESP32 WiFiClient takes seconds, not milliseconds.
   }
-  if (millis() - requestStarted > REQUEST_TIMEOUT_MS) { reply(408, "{\"error\":\"timeout\"}"); return; }
+  if (millis() - requestStarted > REQUEST_TIMEOUT_MS) {
+    // Rejections of the settings surface re-render the settings page with
+    // the reason; every other request keeps the generic JSON body. Neither
+    // path touches the stored or live settings.
+    if (configSurface) replyHtml(408, configPageWithError("Request timed out."));
+    else reply(408, "{\"error\":\"timeout\"}");
+    return;
+  }
   for (size_t budget = 0; budget < 1024 && client.available(); ++budget) {
     const int value = client.read();
     if (value < 0) break;

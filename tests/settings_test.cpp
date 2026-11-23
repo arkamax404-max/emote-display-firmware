@@ -27,7 +27,9 @@
 //                    its rollback: bit0/1 commit stores nothing (b/c),
 //                    bit2/3 commit persists value^1 (b/c), bit4/5 rollback
 //                    stores nothing (b/c), bit6/7 rollback persists
-//                    value^1 (b/c). [<p>] [<c>] = the offered percent and
+//                    value^1 (b/c). Bit 8: a rollback removal of
+//                    `brightness` does not take effect (removeUChar keeps
+//                    the key). [<p>] [<c>] = the offered percent and
 //                    clock code (defaults 80 and 1 = H12).
 #include "display_settings.h"
 #include "panel_settings.h"
@@ -89,7 +91,10 @@ class FakeSettingsStore : public panel_settings::SettingsStore {
     if (fail_ & (1u << (base + bit + 2))) value = static_cast<uint8_t>(value ^ 1u);
     bytes_[key] = value;
   }
-  void removeUChar(const char *key) override { bytes_.erase(key); }
+  void removeUChar(const char *key) override {
+    if ((fail_ & 0x100u) && std::strcmp(key, "brightness") == 0) return;
+    bytes_.erase(key);
+  }
 
  private:
   std::map<std::string, uint8_t> bytes_;
