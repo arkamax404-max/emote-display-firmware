@@ -372,15 +372,17 @@ static std::vector<portal::ScanEntry> scanVisibleNetworks() {
 }
 
 static std::string renderPortalForm(const std::string &error) {
-  char token[9];
-  snprintf(token, sizeof(token), "%08x", static_cast<unsigned>(esp_random()));
-  portalFormToken = token;
+  // The CSRF token is generated once per portal session (openPortal) and kept:
+  // rotating it per render breaks the form, because the phone's captive-portal
+  // probes and the "Scan again" link re-render the page and used to invalidate
+  // the token of the form the user was looking at, answering 403
+  // "Invalid or missing token".
   // The validation path never scans (S5 decision): a page served while the
   // 20 s credential check runs lists no networks; the phase is already back
   // to Portal by the time the post-conclusion re-renders happen.
   if (portalPhase == PortalPhase::Validating)
-    return portal_page::formPage(error, token);
-  return portal_page::formPage(error, token, scanVisibleNetworks());
+    return portal_page::formPage(error, portalFormToken);
+  return portal_page::formPage(error, portalFormToken, scanVisibleNetworks());
 }
 
 static void showPortalSlide() {
@@ -397,6 +399,11 @@ static void showPortalSlide() {
 // exhausted retry); an USB host appearing later does not cancel it.
 static void openPortal() {
   portal::generateApPassword(apPassword, []() { return esp_random(); });
+  // One CSRF token per portal session (R1): a fresh value every time the
+  // portal opens, stable across every render of that session.
+  char token[9];
+  snprintf(token, sizeof(token), "%08x", static_cast<unsigned>(esp_random()));
+  portalFormToken = token;
   // WPA2 (S3 correction): the password argument switches softAP to
   // WPA2_PSK; never an open AP. WIFI_AP_STA (S5/T7) keeps the station
   // interface on so every page render can run its fresh scan; the AP stays

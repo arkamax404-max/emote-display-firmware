@@ -51,7 +51,14 @@ inline std::string formPage(const std::string &error = "", const std::string &to
       "<title>gentle-matrix Wi-Fi setup</title>"
       "<style>"
       "body{font-family:sans-serif;max-width:24em;margin:2em auto;padding:0 1em}"
-      "input{display:block;width:100%;box-sizing:border-box;margin:0.5em 0;padding:0.5em}"
+      // Full-width fields only for the text inputs: the earlier bare `input`
+      // rule also hit the radios, turning every network into a full-width
+      // block and pushing its label out of line.
+      "input[type=password]{display:block;width:100%;box-sizing:border-box;"
+      "margin:0.5em 0;padding:0.5em}"
+      "label.net{display:flex;align-items:center;gap:0.6em;padding:0.35em 0}"
+      "label.net input{margin:0;flex:0 0 auto}"
+      "label.net span{flex:1 1 auto;word-break:break-all}"
       "button{padding:0.5em 1em}"
       ".error{color:#b00;font-weight:bold}"
       "</style></head><body>"
@@ -67,8 +74,8 @@ inline std::string formPage(const std::string &error = "", const std::string &to
   } else {
     for (const portal::ScanEntry &network : networks) {
       const std::string escaped = escapeHtml(network.ssid);
-      page += "<label><input type=\"radio\" name=\"ssid\" value=\"" + escaped +
-              "\" required> " + escaped + "</label>";
+      page += "<label class=\"net\"><input type=\"radio\" name=\"ssid\" value=\"" + escaped +
+              "\" required><span>" + escaped + "</span></label>";
     }
   }
   page +=

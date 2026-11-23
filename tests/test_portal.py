@@ -312,14 +312,16 @@ class PortalTests(unittest.TestCase):
 
     def test_form_page_lists_networks_as_radio_buttons(self):
         html = self.page_with([(b"Alpha", 40), (b"Beta", 20)])
-        self.assertIn('<input type="radio" name="ssid" value="Alpha" required> Alpha</label>', html)
-        self.assertIn('<input type="radio" name="ssid" value="Beta" required> Beta</label>', html)
+        # The label wraps the radio in a flex row: the old block-level rule
+        # pushed every name out of line with its button.
+        self.assertIn('<label class="net"><input type="radio" name="ssid" value="Alpha" required><span>Alpha</span></label>', html)
+        self.assertIn('<label class="net"><input type="radio" name="ssid" value="Beta" required><span>Beta</span></label>', html)
         self.assertIn('<a href="/">Scan again</a>', html)
 
     def test_form_page_escapes_ssid_values_and_labels(self):
         html = self.page_with([(b'Bad"Network<1>&', -5)])
         self.assertIn('value="Bad&quot;Network&lt;1&gt;&amp;"', html)
-        self.assertIn('required> Bad&quot;Network&lt;1&gt;&amp;</label>', html)
+        self.assertIn('required><span>Bad&quot;Network&lt;1&gt;&amp;</span></label>', html)
 
     def test_form_page_without_networks_prompts_a_rescan(self):
         html = self.page_with([])
@@ -490,6 +492,29 @@ class MainWiringStructuralTests(unittest.TestCase):
         self.assertIn('previousPassword', store)
         self.assertIn('preferences.remove(', store)
 
+
+    def test_csrf_token_lives_for_the_whole_portal_session(self):
+        # Rotating the token on every render broke configuration: the phone's
+        # captive-portal probes and the "Scan again" link re-render the page,
+        # which invalidated the token of the form the user had open and
+        # answered 403 "Invalid or missing token".
+        render = self.source.split("static std::string renderPortalForm", 1)[1]
+        render = render[:render.index("\n}")]
+        self.assertNotIn("esp_random()", render)
+        opened = self.source.split("static void openPortal()", 1)[1]
+        opened = opened[:opened.index("\n}")]
+        self.assertIn("esp_random()", opened)
+        self.assertIn("portalFormToken = token;", opened)
+
+    def test_network_rows_keep_the_button_inline_with_the_name(self):
+        # A bare `input` rule made every radio a full-width block and pushed
+        # its name out of line; the full-width rule is scoped to the password
+        # field and the rows are flex labels.
+        page = (ROOT / "include" / "portal_page.h").read_text()
+        self.assertIn("input[type=password]{display:block;width:100%", page)
+        self.assertNotIn('"input{display:block', page)
+        self.assertIn("label.net{display:flex;align-items:center", page)
+        self.assertIn('label class=\\"net\\"', page)
 
 if __name__ == "__main__":
     unittest.main()
