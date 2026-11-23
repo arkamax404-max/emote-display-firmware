@@ -612,6 +612,29 @@ class ChannelOrderStructuralTests(unittest.TestCase):
         self.assertIn("channelOrder", unverified)
 
 
+    def test_panel_is_constructed_once_and_begun_after_pins_are_final(self):
+        # Protomatter copies the pin list inside its constructor, so the order
+        # has to be applied before the object exists: construct once, after
+        # applyOrder, before begin(). A regression here leaves the panel dark
+        # and no host test would notice.
+        self.assertEqual(
+            self.source.count("new (panelStorage) Adafruit_Protomatter("), 1)
+        self.assertEqual(self.source.count("matrix.begin()"), 1)
+        setup = self.source.split("void setup() {", 1)[1]
+        construct = setup.index("new (panelStorage) Adafruit_Protomatter(")
+        self.assertLess(setup.index("rgb_order::applyOrder(channelOrder, rgbPins);"),
+                        construct)
+        self.assertLess(construct, setup.index("matrix.begin()"))
+
+    def test_rgb_store_uses_readback_not_putuchar_truthiness(self):
+        # Code 0 is RGB and putUChar returns 0 on success anyway, so the store
+        # must verify the written byte by reading it back.
+        store = self.source.split("static bool storeRgbOrder(", 1)[1]
+        store = store[:store.index("\n}")]
+        self.assertIn('preferences.isKey("rgborder")', store)
+        self.assertIn('preferences.getUChar("rgborder", 255) == rgb_order::orderCode(order)', store)
+        self.assertNotIn('preferences.putUChar("rgborder", rgb_order::orderCode(order)) != 0', store)
+
 if __name__ == "__main__":
     unittest.main()
 
