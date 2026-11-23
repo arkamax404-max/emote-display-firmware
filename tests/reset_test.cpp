@@ -10,14 +10,20 @@
 //
 //   erase     include/wifi_credentials_reset.h eraseCredentials over a fake
 //             store whose keys are a bitmask: bit0 ssid, bit1 password,
-//             bit2 updir, bit3 brightness. removeKey leaves the key in
-//             place when its fail bit is set (simulated write failure).
+//             bit2 updir, bit3 brightness. Every key has a fixed non-empty
+//             value; removeKey leaves both key and value in place when its
+//             fail bit is set (simulated write failure).
 //       erase <present> <fail> → "erase <ok|unverified> left=<mask>"
+//       dump                   → "dump ssid=<len>:<hex> password=<len>:<hex>
+//                              updir=<len>:<hex> brightness=<len>:<hex>"
+//                              with "-" instead of the spec for absent keys,
+//                              so tests can pin byte-identical restore.
 #include "wifi_credentials_reset.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -43,13 +49,43 @@ void runHoldScript() {
 
 class FakeStore : public wifi_reset::CredentialStore {
  public:
-  explicit FakeStore(unsigned keys, unsigned failMask)
-      : keys_(keys), failMask_(failMask) {}
+  FakeStore(unsigned keys, unsigned failMask)
+      : keys_(keys), failMask_(failMask) {
+    values_["ssid"] = "my ssid";
+    values_["password"] = "p4ssw0rd!";
+    values_["updir"] = "/icons/sub";
+    values_["brightness"] = "16"; // out of scope, must survive untouched
+  }
   bool hasKey(const char *key) override { return (keys_ & maskFor(key)) != 0; }
+  std::string readKey(const char *key) override {
+    auto it = values_.find(key);
+    return it == values_.end() ? std::string() : it->second;
+  }
+  bool writeKey(const char *key, const std::string &value) override {
+    values_[key] = value;
+    keys_ |= maskFor(key);
+    return true;
+  }
   void removeKey(const char *key) override {
     keys_ &= ~maskFor(key) | failMask_;
   }
   unsigned keys() const { return keys_; }
+
+  std::string valueSpec(const char *key) const {
+    if ((keys_ & maskFor(key)) == 0) return "-";
+    auto it = values_.find(key);
+    if (it == values_.end() || it->second.empty()) return "-";
+    static const char *kHex = "0123456789abcdef";
+    std::string spec;
+    char len[16];
+    std::snprintf(len, sizeof(len), "%d:", static_cast<int>(it->second.size()));
+    spec += len;
+    for (unsigned char c : it->second) {
+      spec += kHex[c >> 4];
+      spec += kHex[c & 0xf];
+    }
+    return spec;
+  }
 
   static unsigned maskFor(const char *key) {
     if (std::strcmp(key, "ssid") == 0) return 1u;
@@ -61,6 +97,7 @@ class FakeStore : public wifi_reset::CredentialStore {
 
  private:
   unsigned keys_ = 0, failMask_ = 0;
+  std::map<std::string, std::string> values_;
 };
 
 void runEraseScript() {
@@ -75,6 +112,10 @@ void runEraseScript() {
     const bool verified = wifi_reset::eraseCredentials(store);
     std::cout << "erase " << (verified ? "ok" : "unverified") << " left="
               << store.keys() << '\n';
+    std::cout << "dump ssid=" << store.valueSpec("ssid")
+              << " password=" << store.valueSpec("password")
+              << " updir=" << store.valueSpec("updir")
+              << " brightness=" << store.valueSpec("brightness") << '\n';
   }
 }
 } // namespace

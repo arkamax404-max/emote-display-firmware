@@ -14,6 +14,17 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEBOUNCE_MS = 50
 HOLD_MS = 5000
 
+# Fixed fake-store values (byte-identical restore assertions).
+SSID_VALUE = "my ssid"
+PASSWORD_VALUE = "p4ssw0rd!"
+UPDIR_VALUE = "/icons/sub"
+BRIGHTNESS_VALUE = "16"
+
+
+def _hexspec(value):
+    """<len>:<hex> spec of a stored byte string."""
+    return "%d:%s" % (len(value), value.encode("latin-1").hex())
+
 
 class HoldResetTests(unittest.TestCase):
     @classmethod
@@ -122,6 +133,40 @@ class HoldResetTests(unittest.TestCase):
         # second hold: accepted at 3060+50=3110, fires at 3110+5000=8110
         self.assertEqual(fired, [(8110 // 10) + 1])
 
+    def test_release_just_before_threshold_does_not_fire(self):
+        # A release just before the threshold: raw pressed at 0/100/150, raw
+        # low at 5149 and 5150. Firing requires the RAW level pressed at the
+        # firing poll AND 5000 ms of continuous accepted press; the old
+        # accepted-level-only check fired at 5150 (anchor 100: 5050 ms) while
+        # the button was already released, erasing credentials for nothing.
+        # The 5199/5200 polls show the debounced release finishing the cancel.
+        lines = ["reset", "hold 0 1", "hold 100 1", "hold 150 1",
+                 "hold 5149 0", "hold 5150 0", "hold 5199 0", "hold 5200 0"]
+        out = self.run_script(lines)
+        self.assertEqual([line for line in out[1:] if line != "hold -"], [])
+
+    def test_short_release_glitch_during_hold_still_fires(self):
+        # A 40 ms raw release (< DEBOUNCE_MS) straddling the hold completion
+        # must not abort an ongoing hold; the fire is merely delayed until the
+        # raw level reads pressed again.
+        lines = ["reset"]
+        t = 0
+        while t <= 6000:
+            press = t < 5000 or t >= 5040  # raw low only in [5000, 5040)
+            lines.append("hold %d %d" % (t, int(press)))
+            t += 10
+        out = self.run_script(lines)
+        fired = [i for i, line in enumerate(out) if line == "hold fire"]
+        self.assertEqual(fired, [5050 // 10 + 1])  # exactly once, on schedule
+
+    def test_hold_completing_while_pressed_fires_exactly_once(self):
+        # Uninterrupted press: the fire lands on the first poll where the
+        # accepted press has lasted 5000 ms and the raw level is still down,
+        # and it never repeats.
+        out = self.poll(0, 5100, 100)
+        self.assertEqual([line for line in out if line == "hold fire"],
+                         ["hold fire"])
+
     def test_fire_is_exactly_once_per_hold(self):
         # Continuing to hold past the fire never repeats it.
         lines = ["reset"]
@@ -142,7 +187,14 @@ class HoldResetTests(unittest.TestCase):
     # --- T8: verified erase scope ------------------------------------------------
 
     def erase_keys(self, present, fail=0):
-        return self.run_script(["erase %d %d" % (present, fail)], mode="erase")
+        # The `erase` result line only; use erase_and_dump for value-level
+        # assertions.
+        return self.run_script(["erase %d %d" % (present, fail)],
+                               mode="erase")[:1]
+
+    def erase_and_dump(self, present, fail=0):
+        return self.run_script(["erase %d %d" % (present, fail), "dump"],
+                               mode="erase")
 
     def test_erase_removes_exactly_ssid_password_updir(self):
         # brightness (bit 3) is out of scope: it must survive untouched.
@@ -159,10 +211,35 @@ class HoldResetTests(unittest.TestCase):
 
     def test_erase_reports_an_unverified_removal(self):
         # A simulated write failure leaves ssid in place: the outcome must be
-        # "unverified" (the firmware then skips the restart) and the key kept.
-        self.assertEqual(self.erase_keys(15, fail=1), ["erase unverified left=9"])  # ssid kept; brightness was never in scope
-        # The other keys are still erased even when one fails.
-        self.assertEqual(self.erase_keys(15, fail=2), ["erase unverified left=10"])
+        # "unverified" (the firmware then skips the restart). The loop stops
+        # at the first unverifiable removal and restores the keys removed
+        # before it, so the named keys survive as well.
+        self.assertEqual(self.erase_keys(15, fail=1), ["erase unverified left=15"])  # ssid kept; brightness was never in scope
+        # Password fails: ssid was already removed and must be RESTORED
+        # byte-identically before reporting failure, so every value lives on.
+        self.assertEqual(self.erase_keys(15, fail=2), ["erase unverified left=15"])
+
+    def test_failed_password_removal_restores_original_values_exactly(self):
+        # The documented invariant: a failed erase leaves the stored
+        # configuration exactly as it was. Values are snapshotted before
+        # mutating and the keys already removed are written back.
+        out = self.erase_and_dump(15, fail=2)  # password (bit1) removal fails
+        self.assertEqual(out[0], "erase unverified left=15")
+        self.assertEqual(
+            out[1],
+            "dump ssid=%s password=%s updir=%s brightness=%s" % (
+                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+                _hexspec(UPDIR_VALUE), _hexspec(BRIGHTNESS_VALUE)))
+
+    def test_success_path_removes_exactly_the_three_keys(self):
+        # The success path removes exactly ssid/password/updir with verified
+        # read-back; brightness and its value are untouched.
+        out = self.erase_and_dump(15, fail=0)
+        self.assertEqual(out[0], "erase ok left=8")
+        self.assertEqual(
+            out[1],
+            "dump ssid=- password=- updir=- brightness=%s"
+            % _hexspec(BRIGHTNESS_VALUE))
 
 
 class MainWiringStructuralTests(unittest.TestCase):
@@ -189,6 +266,14 @@ class MainWiringStructuralTests(unittest.TestCase):
         self.assertLess(poll.index("clearProvisionedCredentials()"),
                         poll.index("ESP.restart()"))
         self.assertIn("wifi_reset::eraseCredentials", self.source)
+
+    def test_no_restart_when_erase_unverified(self):
+        # ESP.restart() sits inside the verified branch: on an unverified erase
+        # only the retry message follows, never a restart.
+        poll = self.source.split("static void pollCredentialsReset()", 1)[1]
+        gate = poll.index("if (clearProvisionedCredentials())")
+        self.assertLess(poll.index("ESP.restart()", gate),
+                        poll.index("could not be verified"))
 
 
 if __name__ == "__main__":

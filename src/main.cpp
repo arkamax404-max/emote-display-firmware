@@ -136,14 +136,31 @@ static bool storeCredentials(const char *newSsid, const char *newPassword) {
 static wifi_reset::HoldReset downHold;
 
 // Preferences adapter for the host-tested erase routine: the `gentle`
-// namespace is already open read-write when eraseCredentials runs.
+// namespace is already open read-write when eraseCredentials runs. The
+// read/write operations serve the failure-restore path (values snapshotted
+// before mutating and written back byte-identically on an unverified erase)
+// and are restricted to exactly the three keys of the reset scope.
 class ProvisionedPrefs : public wifi_reset::CredentialStore {
  public:
   explicit ProvisionedPrefs(Preferences &prefs) : preferences_(prefs) {}
   bool hasKey(const char *key) override { return preferences_.isKey(key); }
+  std::string readKey(const char *key) override {
+    if (!isResetKey(key)) return std::string();
+    return std::string(preferences_.getString(key, "").c_str());
+  }
+  bool writeKey(const char *key, const std::string &value) override {
+    if (!isResetKey(key)) return false;
+    return preferences_.putString(key, String(value.c_str())) != 0;
+  }
   void removeKey(const char *key) override { preferences_.remove(key); }
 
  private:
+  // The reset scope (S6 decision) is fixed: `ssid`, `password` and `updir`.
+  static bool isResetKey(const char *key) {
+    return std::strcmp(key, "ssid") == 0 ||
+           std::strcmp(key, "password") == 0 ||
+           std::strcmp(key, "updir") == 0;
+  }
   Preferences &preferences_;
 };
 
