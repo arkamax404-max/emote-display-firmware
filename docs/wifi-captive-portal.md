@@ -3,12 +3,15 @@
 What the firmware does when it cannot join its saved Wi-Fi: after an exact,
 bounded boot-time retry schedule it opens a **WPA2 SoftAP** (`gentle-matrix`)
 with a captive portal (DNS wildcard responder plus a configuration page on
-port 80) so the network can be reconfigured from a phone. Implemented in
-`include/portal_policy.h` (host-testable decisions), `include/portal_page.h`
-(host-testable HTML renderer) and the portal block of `src/main.cpp`.
-Covered by `tests/test_portal.py` (26 tests). Task
-`odd/tasks/wifi-captive-portal-fallback.md`, T1-T5; T6 (UF2 + device write)
-is separately authorized.
+port 80) so the network can be reconfigured from a phone. The page offers a
+**selector of the networks a fresh scan found**, and holding the board's
+**DOWN button for 5 seconds** erases the saved credentials and restarts.
+Implemented in `include/portal_policy.h` (host-testable decisions),
+`include/portal_page.h` (host-testable HTML renderer),
+`include/wifi_credentials_reset.h` (host-testable hold state machine and
+verified erase) and `src/main.cpp`. Covered by `tests/test_portal.py`
+and `tests/test_reset.py`. Task `odd/tasks/wifi-captive-portal-fallback.md`,
+T1-T9; T6 (UF2 + device write) is separately authorized.
 
 ## When the portal opens
 
@@ -38,7 +41,9 @@ reconnect.
 ## The AP and the password
 
 - SoftAP `gentle-matrix`, **WPA2** (`WiFi.softAP` with a password), channel
-  1, at most 4 clients, address `192.168.4.1`.
+  1, at most 4 clients, address `192.168.4.1`. While the portal is open the
+  radio runs in `WIFI_AP_STA`: the AP and the phone's connection stay up and
+  the station interface is available for the page's fresh scans.
 - The AP password is **exactly 8 characters** — the WPA2 PSK minimum —
   generated once with `esp_random()` from the alphabet
   `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (uppercase letters and digits without
@@ -59,6 +64,36 @@ password exists so a person standing at the board can join without a data
 cable. The board connects afterwards to the user's own network with the
 stronger handling below.
 
+## The network selector
+
+The configuration page lists the networks the scan found; no manual SSID
+field exists (the user removed it). The selection rules, host-tested in
+`portal::selectNetworks` (`include/portal_policy.h`):
+
+- **One fresh scan per page render**: `WiFi.scanNetworks()` runs each time
+  the form is rendered, so every page load is a fresh list; the "Scan
+  again" link simply reloads the page. The page is served after the scan.
+- A scan blocks for a few seconds and can disturb the AP briefly; the
+  validation attempt itself **never scans**, so a page served while the
+  20 s credential check runs lists no networks and the check is not
+  disturbed.
+- Every visible network becomes a **radio button of the single `ssid`
+  field**; the escape rules apply to both the value and the label. The
+  offered values are reviewed with the same `1-32 bytes` rule the serial
+  console enforces, and the per-render CSRF token is unchanged.
+- The raw scan results are **de-duplicated by SSID** (the strongest RSSI of
+  each name survives — a network seen on two bands is one choice), **dropped
+  when the SSID is empty** (hidden networks are not selectable anywhere in
+  the portal), **sorted by descending RSSI** (input order breaks ties) and
+  **capped at 12 entries** to bound the page.
+- If the list is empty the page says so and asks for a reload; reloading
+  rescans.
+- **Consequence stated honestly:** a hidden or out-of-range network cannot
+  be configured from the portal; USB provisioning
+  (`scripts/provision_wifi.py`) remains the route for those.
+- After the scan the raw results buffer is deleted (`WiFi.scanDelete()`) so
+  memory stays bounded.
+
 ## Validation before saving
 
 `POST /save` (form fields `ssid`, `password`) never writes first:
@@ -74,10 +109,11 @@ stronger handling below.
    namespace (`ssid`/`password`) with the same read-back verification the
    serial hook uses, a "saved, restarting" page is served, and the firmware
    restarts to join the network.
-4. **Failure**: the station disconnects, the board returns to AP-only, the
-   stored credentials are left untouched, the offered buffers are zeroed
-   and the page re-renders with an error. The portal stays open for another
-   try.
+4. **Failure**: the station disconnects and goes idle (the portal keeps the
+   radio in `WIFI_AP_STA` so the next page render rescans), the stored
+   credentials are left untouched, the offered buffers are zeroed and the
+   page re-renders — with a fresh scan's network list — and the error. The
+   portal stays open for another try.
 
 The offered home-network passphrase keeps the stronger secret handling: it
 is never logged, never echoed into the HTML, never shown on the panel, and
@@ -86,7 +122,8 @@ concludes (both outcomes). Nothing about it is exposed in `/health`.
 
 ## The page and the routes
 
-- `GET` **any** path returns the form page (200, HTML), so operating-system
+- `GET` **any** path returns the form page (200, HTML) — a fresh scan's
+  network list plus the password field — so operating-system
   captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, ...) land on it
   and trigger the portal prompt.
 - `GET /health` returns `{"ok":true,"portal":true,"apSsid":"gentle-matrix",
@@ -116,6 +153,34 @@ the station server is not listening. The station's HTTP routes, mDNS and
 - During validation the panel shows `TRY WIFI / CHECK`; on successful save
   `WIFI / SAVING` until the restart.
 
+## Clearing the saved credentials: hold DOWN for 5 seconds
+
+`PIN_BUTTON_DOWN` from the variant's own `pins_arduino.h` (**GPIO 7**,
+read as `INPUT_PULLUP`, active low — nothing else in the firmware claims
+that button; the UP button of the Wi-Fi info overlay is GPIO 6):
+
+- The level is read every loop and debounced **50 ms**; the reset fires when
+  the debounced press has lasted **5000 ms** continuously. Any release
+  before that discards the press, and a glitch shorter than the debounce
+  window cannot abort a running hold.
+- The poller runs **in every mode**: the hold clears and restarts whether
+  the board is connected, retrying at boot or serving the portal. It never
+  reads or blocks `Serial` and does not disturb the UP-button overlay or the
+  orientation handling.
+- Exactly three keys are removed from the `gentle` namespace, each verified
+  gone by **read-back**: `ssid`, `password` and `updir`. Brightness and
+  every other stored value are untouched, and nothing is written outside
+  that namespace. (Removing `updir` is part of the user-agreed scope: the
+  upright reference is relearned on the first stable pose after the
+  restart, as at the first boot.)
+- **No panel message is shown** (the user chose silence): the restart is
+  the only feedback. If a removal cannot be verified, the board does **not**
+  restart — the configuration is left exactly as it was and another 5 s
+  hold retries.
+- After the restart with no credentials stored, the boot gate decides as
+  always: with a USB host enumerated, `SET WIFI / VIA USB`; without one, the
+  portal opens immediately.
+
 ## Residual risk: the passphrase crosses the air in the clear
 
 The home-network passphrase crosses a **plaintext HTTP form** (no TLS): the
@@ -129,6 +194,9 @@ visible to others; otherwise provision over **USB** (`scripts/provision_wifi.py`
 
 ## Recovery
 
+- **Hold DOWN for 5 seconds** to erase `ssid`/`password`/`updir` (verified)
+  and restart: the cleared board is back at the boot gate — the portal, or
+  USB provisioning when a computer is attached.
 - A bad save never bricks the board: the stored credentials are untouched
   on failure and the portal stays open.
 - To leave portal mode with the old configuration: power-cycle (or RESET).
