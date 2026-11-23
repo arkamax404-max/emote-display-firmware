@@ -28,6 +28,71 @@ constexpr const char *CONFIG_PATH = "/config";
 // cover it.
 constexpr size_t CONFIG_BODY_MAX = 255;
 
+// S9/S10 persistence transaction: the settings pair is stored through an
+// injected store and every decision is made by READ-BACK — a putUChar-style
+// return value is never trusted and zero is a valid stored code (the H24
+// default). The pair is atomic:
+// - both commit writes are followed by a read-back; any miss triggers the
+//   rollback,
+// - every rollback write is attempted (even after an earlier rollback miss)
+//   and followed by its own read-back; a rollback write that cannot be
+//   persisted or lies leaves the result unverified,
+// - the call reports success ONLY after a fully verified store, so the
+//   caller applies the live values (and repaints the panel) only then — a
+//   failed or unverified call changes no live state, even when the stored
+//   bytes could not be perfectly restored.
+// An absent stored state stays distinguishable from any stored value, so a
+// rollback can faithfully restore "was not stored".
+class SettingsStore {
+ public:
+  virtual ~SettingsStore() = default;
+  virtual bool hasUChar(const char *key) = 0;
+  // false = the key is absent or unreadable.
+  virtual bool readUChar(const char *key, uint8_t &value) = 0;
+  // Fire-and-verify writes: a failing store may persist nothing or
+  // something else; the transaction decides only through its read-back.
+  virtual void writeUChar(const char *key, uint8_t value) = 0;
+  virtual void removeUChar(const char *key) = 0;
+};
+
+inline bool storeSettings(SettingsStore &store, uint8_t brightnessPercent,
+                          idle_clock::ClockFormat clock) {
+  if (!panel::validBrightnessPercent(brightnessPercent)) return false;
+  const bool hadBrightness = store.hasUChar("brightness");
+  uint8_t previousBrightness = 0;
+  if (hadBrightness && !store.readUChar("brightness", previousBrightness))
+    return false;
+  const bool hadClock = store.hasUChar("clockformat");
+  uint8_t previousClock = 0;
+  if (hadClock && !store.readUChar("clockformat", previousClock)) return false;
+  const uint8_t clockCode = idle_clock::clockFormatCode(clock);
+  auto verifiedWrite = [](SettingsStore &s, const char *key, uint8_t value) {
+    s.writeUChar(key, value);
+    uint8_t back = 0;
+    return s.readUChar(key, back) && back == value;
+  };
+  const bool brightnessOk =
+      verifiedWrite(store, "brightness", brightnessPercent);
+  const bool clockOk = verifiedWrite(store, "clockformat", clockCode);
+  if (brightnessOk && clockOk) return true;
+  // Rollback: every restore is attempted and verified by read-back; nothing
+  // here can turn a failed store into success.
+  auto restore = [](SettingsStore &s, bool existed, const char *key,
+                    uint8_t value) {
+    if (!existed) {
+      s.removeUChar(key);
+      uint8_t back = 0;
+      return !s.hasUChar(key) && !s.readUChar(key, back);
+    }
+    s.writeUChar(key, value);
+    uint8_t back = 0;
+    return s.readUChar(key, back) && back == value;
+  };
+  restore(store, hadBrightness, "brightness", previousBrightness);
+  restore(store, hadClock, "clockformat", previousClock);
+  return false;
+}
+
 // Exact first-line classification for the settings routes (S8). Only these
 // exact lines belong to the settings surface; everything else — every
 // receiver route and the unknown paths — is left to the receiver parser

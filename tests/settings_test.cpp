@@ -17,12 +17,25 @@
 //   length <hex>      parseContentLength → "length <n|-1>"
 //   page <p> <24h|12h> <errhex> → "page <escaped html>"
 //   saved            → "saved <escaped html>" (the success page)
+//   store <present> <fail> [<p>] [<c>]
+//                    panel_settings::storeSettings over a fake store →
+//                    "store <ok|fail> b=<n|-> c=<n|->" (the stored pair
+//                    after the call, '-' = absent). <present> bit0/bit1:
+//                    brightness/clockformat keys exist up front (defaults
+//                    30 and 0 = H24). <fail> bits per KEY and PHASE, the
+//                    first write of a key being the commit and the second
+//                    its rollback: bit0/1 commit stores nothing (b/c),
+//                    bit2/3 commit persists value^1 (b/c), bit4/5 rollback
+//                    stores nothing (b/c), bit6/7 rollback persists
+//                    value^1 (b/c). [<p>] [<c>] = the offered percent and
+//                    clock code (defaults 80 and 1 = H12).
 #include "display_settings.h"
 #include "panel_settings.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -49,6 +62,40 @@ std::string escape(const std::string &text) {
   }
   return out;
 }
+
+// Fake store for the S9/S10 persistence transaction: writes are counted per
+// key (first write = commit, second = its rollback) so the fail mask can
+// target a commit while leaving the rollback healthy, and every write can
+// either store nothing (a write that cannot be persisted — detected only by
+// the transaction's read-back) or persist value^1 (a write that lies).
+class FakeSettingsStore : public panel_settings::SettingsStore {
+ public:
+  FakeSettingsStore(unsigned present, unsigned fail) : fail_(fail) {
+    if (present & 1u) bytes_["brightness"] = panel::BRIGHTNESS_DEFAULT_PERCENT;
+    if (present & 2u) bytes_["clockformat"] = 0; // 0 = H24, a valid stored code
+  }
+  bool hasUChar(const char *key) override { return bytes_.count(key) != 0; }
+  bool readUChar(const char *key, uint8_t &value) override {
+    const auto it = bytes_.find(key);
+    if (it == bytes_.end()) return false;
+    value = it->second;
+    return true;
+  }
+  void writeUChar(const char *key, uint8_t value) override {
+    const unsigned bit = std::strcmp(key, "brightness") == 0 ? 0u : 1u;
+    const bool rollback = writes_[key]++ != 0;
+    const unsigned base = rollback ? 4u : 0u;
+    if (fail_ & (1u << (base + bit))) return; // write stores nothing
+    if (fail_ & (1u << (base + bit + 2))) value = static_cast<uint8_t>(value ^ 1u);
+    bytes_[key] = value;
+  }
+  void removeUChar(const char *key) override { bytes_.erase(key); }
+
+ private:
+  std::map<std::string, uint8_t> bytes_;
+  std::map<std::string, unsigned> writes_;
+  unsigned fail_;
+};
 } // namespace
 
 int main() {
@@ -141,6 +188,21 @@ int main() {
                 << escape(panel_settings::configPage(
                        static_cast<uint8_t>(percent), format, unhex(errorHex)))
                 << '\n';
+    } else if (cmd == "store") {
+      unsigned present = 0, fail = 0, percent = 80, code = 1;
+      args >> present >> fail;
+      if (args >> percent) args >> code;
+      FakeSettingsStore store(present, fail);
+      const idle_clock::ClockFormat format = code == 1
+          ? idle_clock::ClockFormat::H12 : idle_clock::ClockFormat::H24;
+      const bool ok = panel_settings::storeSettings(store,
+          static_cast<uint8_t>(percent), format);
+      uint8_t brightness = 0, clock = 0;
+      const bool hasBrightness = store.readUChar("brightness", brightness);
+      const bool hasClock = store.readUChar("clockformat", clock);
+      std::cout << "store " << (ok ? "ok" : "fail")
+                << " b=" << (hasBrightness ? std::to_string(brightness) : "-")
+                << " c=" << (hasClock ? std::to_string(clock) : "-") << '\n';
     } else if (cmd == "saved") {
       std::cout << "saved " << escape(panel_settings::configSavedPage()) << '\n';
     }

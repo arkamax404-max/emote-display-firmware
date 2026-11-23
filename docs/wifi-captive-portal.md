@@ -272,11 +272,14 @@ receiver protocol parser runs, so the receiver's routes and the unknown-path
   apply (`+` is a space, `%XX` requires two hex digits, bare control bytes
   rejected). A rejected value or malformed body re-renders the page with the
   escaped reason (400) and changes nothing; an accepted pair is persisted
-  with read-back verification and applied immediately (200 success page,
-  "no restart needed"); a store that cannot be verified is rolled back to
-  the exact stored pair (same discipline as the credential store) and
-  answers 500 without applying. Missing `Content-Length` → 411, empty body
-  → 400, oversized body → 413.
+  through the verified transaction (`panel_settings::storeSettings`: every
+  commit and rollback write is decided by read-back, a store that cannot be
+  verified — including one whose rollback write itself fails — stays
+  unverified and answers 500 without applying) and applied immediately (200
+  success page, "no restart needed"). Missing `Content-Length` → 411, empty
+  body → 400, oversized body → 413. The `Content-Length` is parsed from the
+  complete header block (after `\r\n\r\n`), never from the first request
+  line alone.
 - The two new keys are NOT in the DOWN-reset scope (the 5-second hold still
   erases exactly `ssid`/`password`/`updir`); the brightness percent and the
   clock format survive it.

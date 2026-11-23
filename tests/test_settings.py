@@ -176,6 +176,14 @@ class SettingsTests(unittest.TestCase):
                         "POST /config HTTP/1.1\r\nContent-Length: 1x\r\n\r\n"):
             self.assertEqual(self.run_script(["length " + feed(headers)]), ["length -1"])
 
+    def test_only_a_complete_header_block_enables_the_length_parse(self):
+        # The identical bytes up to the request line yield no length; the
+        # complete block does. First-line classification sees only the line.
+        line = feed("POST /config HTTP/1.1\r\n")
+        block = feed("POST /config HTTP/1.1\r\nContent-Length: 24\r\n\r\n")
+        self.assertEqual(self.run_script(["length " + line, "length " + block]),
+                         ["length -1", "length 24"])
+
     # --- S8: the page --------------------------------------------------------
 
     def test_page_offers_every_allowed_brightness_and_both_clocks(self):
@@ -203,38 +211,112 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("no restart", out)
         self.assertIn('href="/config"', out)
 
-    # --- wiring pins (structural only; the functional surface is above) ------
+    # --- S9/S10 persistence transaction (verified commit + verified rollback) -
 
-    def test_station_serving_wiring_pins(self):
-        # Secondary evidence only (the functional contracts above drive the
-        # same pure helpers main.cpp wires). These pins hold that the
-        # firmware actually wires the settings surface and that the receiver
-        # parser is untouched.
-        source = (ROOT / "src/main.cpp").read_text()
+    def run_store(self, present, fail, percent=80, code=1):
+        return self.run_script([f"store {present} {fail} {percent} {code}"])[0]
+
+    def test_store_success_persists_both_values(self):
+        # Fresh namespace: both keys are written, each verified by read-back.
+        self.assertEqual(self.run_store(3, 0), "store ok b=80 c=1")
+
+    def test_the_h24_code_zero_round_trips(self):
+        # Zero is a valid stored code and the H24 default; neither a put
+        # result of zero nor a read-back of zero may be mistaken for a
+        # failure.
+        self.assertEqual(self.run_store(3, 0, 25, 0), "store ok b=25 c=0")
+
+    def test_failed_commit_restores_the_exact_previous_pair(self):
+        # The transaction: initial (30, H24), offered (80, H12); the second
+        # (clockformat) commit write cannot be persisted. Every commit is
+        # decided by its read-back, so the failure is detected, the rollback
+        # restores both keys with verified read-backs and the call reports
+        # failure while the stored pair is EXACTLY (30, H24).
+        self.assertEqual(self.run_store(3, 0b10), "store fail b=30 c=0")
+
+    def test_failed_restore_stays_unverified_and_never_applies(self):
+        # The clockformat commit failed and the BRIGHTNESS rollback write
+        # itself cannot be persisted: the result stays unverified (the
+        # stored state is visibly mixed — brightness still holds the offered
+        # 80) and such an outcome must never be reported as success, which is
+        # what keeps the live state untouched (pinned structurally below).
+        self.assertEqual(self.run_store(3, 0b10010), "store fail b=80 c=0")
+
+    def test_rollback_removes_freshly_created_keys(self):
+        # Nothing was stored before: a failed commit must leave the
+        # namespace exactly as it was — empty, not a lone written value.
+        self.assertEqual(self.run_store(0, 0b10), "store fail b=- c=-")
+
+    def test_a_lying_commit_write_is_caught_by_read_back(self):
+        # The commit write persists a DIFFERENT byte and answers as if fine:
+        # only the read-back decides, the rollback follows, the result is
+        # failure with the exact previous pair.
+        self.assertEqual(self.run_store(3, 0b1000), "store fail b=30 c=0")
+
+    def test_a_lying_restore_write_is_caught_by_read_back(self):
+        # Same discipline on the rollback: a restore that persists another
+        # byte is detected and the outcome stays unverified.
+        self.assertEqual(self.run_store(3, 0b1000010), "store fail b=31 c=0")
+
+    def test_rollback_both_writes_run_even_after_an_earlier_failure(self):
+        # Every restore is attempted even when an earlier one cannot be
+        # verified: the clockformat key is still restored here even though
+        # the brightness rollback lied.
+        self.assertEqual(self.run_store(3, 0b1000011), "store fail b=31 c=0")
+
+
+class ConfigWiringTests(unittest.TestCase):
+    """Structural wiring pins over src/main.cpp only: no compilation, so a
+    wrong wiring is RED even while the functional rig does not build."""
+
+    def source(self):
+        return (ROOT / "src/main.cpp").read_text()
+
+    def test_config_length_parsing_waits_for_the_complete_header_block(self):
+        # Blocker 1 pin: only the request LINE is available at the first-line
+        # classification, so nothing there may parse the length or start the
+        # body — a real POST would answer 411 forever. The length parse lives
+        # in the handler that runs after the \r\n\r\n completion check, and
+        # the receiver parser never sees a /config request.
+        source = self.source()
+        first = source.split("static bool handleConfigRequestLine() {", 1)[1]
+        first = first[:first.index("\n}")]
+        self.assertNotIn("parseContentLength", first)
+        self.assertNotIn("readingBody = true", first)
+        begin = source.split("static void beginConfigSave() {", 1)[1]
+        begin = begin[:begin.index("\n}")]
+        self.assertIn("panel_settings::parseContentLength(headers)", begin)
+        self.assertIn("readingBody = true", begin)
+        poll = source.split("static void pollHttp() {", 1)[1]
+        poll = poll[:poll.index("\n}")]
+        firstLine = poll.index("handleConfigRequestLine()")
+        completion = poll.index('if (headers.size() < 4 ||')
+        dispatch = poll.index("beginConfigSave();")
+        parse = poll.index("receiver::parseHeaders(headers, request)")
+        self.assertLess(firstLine, completion)
+        self.assertLess(completion, dispatch)
+        self.assertLess(dispatch, parse)
+
+    def test_recorded_wiring_pins(self):
+        # Secondary evidence only (the functional contracts drive the same
+        # pure helpers main.cpp wires). These pins hold that the firmware
+        # actually wires the settings surface and that the receiver parser
+        # is untouched.
+        source = self.source()
         self.assertLess(source.index("panel_settings::routeOf("),
                         source.index("receiver::parseHeaders(headers, request)"))
-        # The first-line check happens inside the header loop, before the
-        # \r\n\r\n classification, and is reset with the request state.
         self.assertIn("configFirstLineChecked = true;", source)
         self.assertIn("configFirstLineChecked = false;", source)
-        # The settings body never enters the PNG payload buffer.
         self.assertIn("configBody.push_back", source)
         self.assertIn("applyConfigSave()", source)
-        # Runtime values apply through the ONE setter: the loader and the
-        # POST /config application, nothing else.
         self.assertEqual(source.count("panel::setBrightnessPercent("), 2)
         self.assertIn("loadPanelSettings();", source)
         self.assertEqual(source.count("storePanelSettings("), 2)
-        # The clock draw call passes the runtime format; exactly one site.
         self.assertEqual(source.count("clockFormat);"), 1)
-        # /health reports the live scale first, then the additive percent.
         self.assertEqual(source.count("panel::brightnessScale())"), 1)
         self.assertLess(source.index("panel::brightnessScale())"),
                         source.index("panel::brightnessPercent())"))
-        # Persistence keys with read-back verification.
-        for key in ('putUChar("brightness"', 'putUChar("clockformat"',
-                    'getUChar("brightness", 255)', 'getUChar("clockformat", 255)'):
-            self.assertIn(key, source)
+
         # The DOWN reset scope is unchanged: no settings key is ever stored
         # or removed by the reset routine (the header only names brightness
         # in prose as an out-of-scope value).
@@ -247,6 +329,29 @@ class SettingsTests(unittest.TestCase):
                       (ROOT / "include/firmware_version.h").read_text())
         self.assertIn("panel::color(",
                       (ROOT / "include/diagnostic_status.h").read_text())
+
+    def test_live_values_apply_only_in_the_verified_store_branch(self):
+        # Blocker 2 pin: `applyConfigSave` may touch the runtime state and
+        # the panel ONLY inside the if of the verified storePanelSettings —
+        # an unverified (or mixed-rollback) store applies nothing.
+        source = self.source()
+        body = source.split("static void applyConfigSave() {", 1)[1]
+        body = body[:body.index("\n}")]
+        pre = body.split("if (storePanelSettings", 1)[0]
+        self.assertNotIn("panel::setBrightnessPercent(", pre)
+        self.assertNotIn("clockFormat =", pre)
+        applied = body.split(
+            "if (storePanelSettings(brightness.percent, clock.format)) {", 1)[1]
+        applied = applied[:applied.index("\n  }")]
+        for wired in ("panel::setBrightnessPercent(",
+                      "clockFormat = clock.format;", "presentDisplay();"):
+            self.assertIn(wired, applied)
+        # The store itself is the host-tested transaction, adapted onto
+        # Preferences with absence-distinguishing reads and no trusted put.
+        self.assertIn("panel_settings::storeSettings(store, percent, clock)",
+                      source)
+        self.assertIn("panel_settings::SettingsStore", source)
+        self.assertIn("preferences_.getUChar(key, 255)", source)
 
 
 if __name__ == "__main__":

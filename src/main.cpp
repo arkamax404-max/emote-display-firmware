@@ -69,6 +69,9 @@ static bool readingBody = false;
 // receiver protocol parser sees anything; the bounded settings form body
 // accumulates in its own small buffer, never in the PNG payload buffer.
 static bool configFirstLineChecked = false;
+// A first line classified as POST /config lingers until the complete header
+// block (see handleConfigRequestLine/beginConfigSave).
+static bool configSavePending = false;
 static std::string configBody;
 static size_t configBodyLength = 0;
 static uint32_t requestStarted = 0;
@@ -165,36 +168,39 @@ static idle_clock::ClockFormat clockFormat = idle_clock::ClockFormat::H24;
 
 // S9/S10 settings persistence: both live in the `gentle` namespace under
 // their own keys (`brightness`, the percent byte; `clockformat`, the format
-// code), each verified by read-back — putUChar returns zero for a stored 0,
-// so like every other store here the put result is never trusted. Neither
-// key is in the DOWN-reset scope (wifi_reset erases exactly
-// ssid/password/updir). The stored pair is atomic: a write whose read-back
-// fails is rolled back so old/new values are never mixed, and an absent or
+// code). The commit/rollback/verification rules live in the host-tested
+// panel_settings::storeSettings transaction; the firmware only adapts an
+// open Preferences namespace onto it. Neither key is in the DOWN-reset
+// scope (wifi_reset erases exactly ssid/password/updir). An absent or
 // out-of-range stored value falls back to the defaults (30 %, 24 h).
-static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock) {
-  if (!panel::validBrightnessPercent(percent)) return false;
-  bool saved = false;
-  if (preferences.begin("gentle", false)) {
-    const bool hadBrightness = preferences.isKey("brightness");
-    const uint8_t previousBrightness = preferences.getUChar("brightness", 255);
-    const bool hadFormat = preferences.isKey("clockformat");
-    const uint8_t previousFormat = preferences.getUChar("clockformat", 255);
-    preferences.putUChar("brightness", percent);
-    preferences.putUChar("clockformat", idle_clock::clockFormatCode(clock));
-    saved = preferences.isKey("brightness") &&
-            preferences.getUChar("brightness", 255) == percent &&
-            preferences.isKey("clockformat") &&
-            preferences.getUChar("clockformat", 255) ==
-                idle_clock::clockFormatCode(clock);
-    if (!saved) {
-      if (hadBrightness) preferences.putUChar("brightness", previousBrightness);
-      else preferences.remove("brightness");
-      if (hadFormat) preferences.putUChar("clockformat", previousFormat);
-      else preferences.remove("clockformat");
-    }
-    preferences.end();
+class ProvisionedSettingsStore : public panel_settings::SettingsStore {
+ public:
+  explicit ProvisionedSettingsStore(Preferences &prefs) : preferences_(prefs) {}
+  bool hasUChar(const char *key) override { return preferences_.isKey(key); }
+  // Absence (isKey false) is returned as false, never as a sentinel value:
+  // rollback must be able to restore "was not stored" faithfully.
+  bool readUChar(const char *key, uint8_t &value) override {
+    if (!preferences_.isKey(key)) return false;
+    value = preferences_.getUChar(key, 255);
+    return true;
   }
-  return saved;
+  // Fire-and-verify: putUChar's return is never trusted (it is zero for a
+  // legitimately stored 0); the transaction's read-back decides.
+  void writeUChar(const char *key, uint8_t value) override {
+    preferences_.putUChar(key, value);
+  }
+  void removeUChar(const char *key) override { preferences_.remove(key); }
+
+ private:
+  Preferences &preferences_;
+};
+
+static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock) {
+  if (!preferences.begin("gentle", false)) return false;
+  static ProvisionedSettingsStore store(preferences);
+  const bool verified = panel_settings::storeSettings(store, percent, clock);
+  preferences.end();
+  return verified;
 }
 
 static void loadPanelSettings() {
@@ -845,6 +851,7 @@ static void closeRequest() {
   readingBody = false;
   request = receiver::Request{};
   configFirstLineChecked = false;
+  configSavePending = false;
   configBody.clear();
   configBodyLength = 0;
 }
@@ -910,9 +917,14 @@ static void applyConfigSave() {
 // receiver protocol parser, whose routes (/emote, the session controls and
 // /health) and unknown-path 404 keep their exact semantics: only the exact
 // "GET /config" / "POST /config" lines are taken by this surface, everything
-// else is left to the parser untouched. Returns true when the request is now
-// owned by the settings path (a page was replied, or the bounded form body
-// is being read), false when the receiver parser owns it.
+// else is left to the parser untouched. ONLY the first request LINE exists
+// here: a GET /config (no body) may answer immediately, but a POST /config
+// must NOT parse its Content-Length out of a header block that has not
+// arrived yet — that used to answer 411 to every real POST. The POST instead
+// lingers as pending until the complete header block, where beginConfigSave()
+// takes over. Returns true when this request is now owned by the settings
+// path (a page was replied, or a POST is pending), false when the receiver
+// parser owns it.
 static bool handleConfigRequestLine() {
   const panel_settings::Route route =
       panel_settings::routeOf(headers.substr(0, headers.size() - 2));
@@ -923,23 +935,31 @@ static bool handleConfigRequestLine() {
     replyHtml(200, configPageWithError(""));
     return true;
   }
+  configSavePending = true;
+  return false;
+}
+
+// The header block of a pending POST /config is complete (\r\n\r\n seen):
+// only now can the bounded Content-Length be parsed, then the small form
+// body is read exactly as before. The receiver parser never sees a /config
+// request: this dispatch precedes it.
+static void beginConfigSave() {
   const long contentLength = panel_settings::parseContentLength(headers);
   if (contentLength < 0) {
     replyHtml(411, configPageWithError("Missing content length."));
-    return true;
+    return;
   }
   if (contentLength > static_cast<long>(panel_settings::CONFIG_BODY_MAX)) {
     replyHtml(413, configPageWithError("Form data too large."));
-    return true;
+    return;
   }
   if (contentLength == 0) {
     replyHtml(400, configPageWithError("Empty form."));
-    return true;
+    return;
   }
   configBody.clear();
   configBodyLength = static_cast<size_t>(contentLength);
   readingBody = true;
-  return true;
 }
 
 // One active request, no frame queue. Parsing is bounded and yields each loop.
@@ -973,6 +993,13 @@ static void pollHttp() {
         if (handleConfigRequestLine()) return;
       }
       if (headers.size() < 4 || headers.compare(headers.size() - 4, 4, "\r\n\r\n")) continue;
+      if (configSavePending) {
+        // A pending POST /config: the full header block is here now. The
+        // receiver parser still never sees this request.
+        configSavePending = false;
+        beginConfigSave();
+        return;
+      }
       const int status = receiver::parseHeaders(headers, request);
       if (status == 400 && request.hasName && !request.nameValid) {
         // Distinct parser result for an invalid or duplicate
