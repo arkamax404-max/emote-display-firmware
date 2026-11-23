@@ -17,16 +17,16 @@ Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen 
 
 ## Versión publicada
 
-La release [**v1.1.0**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.1.0) publica el firmware que corre hoy la placa: reserva del display por sesión (`/emote displayOn` / `displayOff`, rutas `claim`/`heartbeat`/`release`) y título de la sesión en la banda superior del reloj autónomo, alternando con la fecha cada 5 s.
+La release [**v1.3.0**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.3.0) publica el firmware que corre hoy la placa: recuperación sin cables mediante portal cautivo (solo cuando no hay un ordenador por USB), selector de redes, página de ajustes en la red (`/config`), brillo en ejecución (10-80 %, por defecto 30 %), reloj 12/24 h con `AM`/`PM`, orden de canales HUB75 seleccionable y reset de credenciales con una pulsación larga de DOWN.
 
 | Asset | Contenido |
 | --- | --- |
-| [`firmware-panel-title.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.1.0/firmware-panel-title.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 1 759 744 bytes, SHA256 `3e13d4bd14cc63368f2956aaf3d6643d8a8f01c2d1acfea42b7fe05bf2dd6b9a` |
-| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.1.0/manifest.json) | Procedencia reproducible: binario de origen y su hash, imágenes de entrada, comandos exactos, herramienta, política de padding y `device_write_performed: false` |
+| [`firmware-panel-config.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.0/firmware-panel-config.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 1 856 000 bytes, SHA256 `9379dea31a1b918563431f83485f6c9a9188e64580031b2f978137d7467bd234`, 3 625 bloques, familia `0xc47e5767` |
+| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.0/manifest.json) | Procedencia reproducible: commit de origen, binario y su hash, comandos exactos, herramienta, validación del UF2 y la grabación realizada |
 
-Para grabarla: doble reset para entrar en TinyUF2, copia el `.uf2` al volumen `MATRXS3BOOT` y espera a que el bootloader reinicie. No hay que borrar nada ni tocar `CURRENT.UF2`. La imagen no contiene credenciales: el Wi-Fi y el resto de la configuración viven en la flash del dispositivo.
+Para grabarla: doble reset para entrar en TinyUF2, copia el `.uf2` al volumen `MATRXS3BOOT` y espera a que el bootloader reinicie. No hay que borrar nada ni tocar `CURRENT.UF2`. La copia escribe solo la partición de aplicación, así que el Wi-Fi, la orientación, el brillo y el orden de canales guardados se conservan.
 
-Verificación de esta versión: 53/53 pruebas anfitrionas, verificación independiente sin divergencias en 207 casos de validación frente al receptor de escritorio, 162/162 operaciones no modificadas idénticas, y comportamiento visible validado por el usuario en la placa.
+Verificación de esta versión: 286/286 pruebas anfitrionas, compilación correcta para `matrixportal_s3`, decodificación estricta del UF2 y prueba diferencial sin diferencias en las rutas del receptor que la versión no modifica. Lo que **no** está verificado en hardware: los pasos de brillo y el 30 % por defecto, la legibilidad del `AM`/`PM`, el flujo completo de `/config` en un navegador, el ciclo de guardado en NVS con sus restauraciones y el borrado con DOWN contra la NVS real. La imagen se grabó y arranca; eso no equivale a haber probado cada comportamiento.
 
 ## Reloj autónomo (v1.0.0 grabado; validación física pendiente)
 
