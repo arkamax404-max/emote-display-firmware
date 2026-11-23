@@ -241,9 +241,11 @@ class PortalTests(unittest.TestCase):
     def test_form_page_never_carries_a_password_value(self):
         # Whether fresh or after an error the inputs are never pre-filled:
         # neither the offered passphrase nor the AP password is echoed back.
-        raw = self.run_script(["page " + feed(b"some error")], mode="page")[0]
+        raw = self.run_script(["page " + feed(b"some error") + " " + feed(b"ab12cd34")],
+                              mode="page")[0]
         html = raw[len("page "):].replace("\\n", "\n")
-        self.assertNotIn("value=", html)
+        self.assertIn('type="hidden" name="token" value="ab12cd34"', html)  # only the token carries a value
+        self.assertNotIn("value=", html.split('name="password"', 1)[1].split(">", 1)[0])
         self.assertIn("some error", html)
 
     def test_error_block_is_html_escaped(self):
@@ -252,6 +254,22 @@ class PortalTests(unittest.TestCase):
         html = raw[len("page "):]
         self.assertIn("Trying &lt;net&gt; &amp; &quot;pass&quot;", html)
         self.assertNotIn("<net>", html)
+
+    # --- R1: per-render CSRF token --------------------------------------------
+
+    def test_csrf_token_review(self):
+        # Exact match; missing, shorter, longer or differing values reject.
+        self.assertEqual(self.run_script(["token " + feed(b"ab12cd34") + " " + feed(b"ab12cd34")]), ["token match"])
+        for offered in (feed(b"ff12cd34"), feed(b"ab12cd3"), feed(b"ab12cd34x"), "-"):
+            self.assertEqual(self.run_script(["token " + feed(b"ab12cd34") + " " + offered]), ["token reject"])
+
+    def test_form_accepts_the_csrf_token_key(self):
+        self.assertEqual(
+            self.run_script(["form " + feed(b"ssid=net&password=secret1&token=ab12cd34")]),
+            ["form ssid=net pass=secret1 token=ab12cd34"])
+        # Unknown keys and a repeated token still reject.
+        for raw in (b"ssid=a&password=b&extra=1", b"ssid=a&password=b&token=x&token=y"):
+            self.assertEqual(self.run_script(["form " + feed(raw)]), ["form error"])
 
 
 # --- structural pins on the firmware wiring (T4) ----------------------------
@@ -362,6 +380,19 @@ class MainWiringStructuralTests(unittest.TestCase):
         # reset path goes through it instead.
         self.assertEqual(self.source.count("portalRequest.clear();"), 1)
         self.assertEqual(self.source.count("wipeRequestBuffer();"), 3)
+
+    def test_validating_client_is_kept_open(self):
+        # R4: while Validating, pollPortal must return before the timeout or a re-read.
+        poll = self.source.split("static void pollPortal() {", 1)[1]
+        poll = poll[:poll.index("\n}")]
+        start = poll.index("if (portalPhase == PortalPhase::Validating)")
+        last = poll[:poll.index("\n  }", start)].rstrip().rsplit("\n", 1)[-1].strip()
+        self.assertEqual(last, "return;")
+
+    def test_post_save_requires_the_rendered_token(self):
+        # R1: the rendered token is reviewed before the credentials are touched.
+        self.assertIn("portal::tokenMatches(portalFormToken, fields.token)", self.source)
+        self.assertIn("portalReply(403,", self.source)
 
     def test_credential_storage_rolls_back_a_partial_write(self):
         # S4 promises the stored credentials stay untouched when a save fails;

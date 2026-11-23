@@ -273,6 +273,16 @@ static void wipeRequestBuffer() {
   portalContentLength = 0;
 }
 
+// Per-render CSRF token (R1): esp_random(), RAM only, embedded as a hidden
+// field in every rendered form and required exactly on POST /save.
+static std::string portalFormToken;
+static std::string renderPortalForm(const std::string &error) {
+  char token[9];
+  snprintf(token, sizeof(token), "%08x", static_cast<unsigned>(esp_random()));
+  portalFormToken = token;
+  return portal_page::formPage(error, token);
+}
+
 static void showPortalSlide() {
   if (portalSlide == 0) displayMessage("AP: GENTLE", apPassword);
   else if (portalSlide == 1) displayMessage("PORTAL", "WIFI SETUP");
@@ -346,7 +356,7 @@ static void concludePortalValidation(bool connected) {
       ESP.restart();
     }
     portalError = "Storage failed. Try again.";
-    portalReply(500, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(500, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   WiFi.disconnect(false);
@@ -355,7 +365,7 @@ static void concludePortalValidation(bool connected) {
   portalError = "Could not connect to that network. Check the name and password, then try again.";
   portalSlide = 0;
   showPortalSlide();
-  portalReply(200, "text/html; charset=utf-8", portal_page::formPage(portalError));
+  portalReply(200, "text/html; charset=utf-8", renderPortalForm(portalError));
 }
 
 // POST /save with a reviewed body: no reply to the client here — validation
@@ -365,13 +375,18 @@ static void beginPortalValidation(const char *body, size_t length) {
   const portal::FormFields fields = portal::parseForm(body, length);
   if (!fields.ok) {
     portalError = "Malformed form data.";
-    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(400, "text/html; charset=utf-8", renderPortalForm(portalError));
+    return;
+  }
+  if (!portal::tokenMatches(portalFormToken, fields.token)) {
+    portalError = "Invalid or missing form token. Reload the page and try again.";
+    portalReply(403, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   const portal::CredError review = portal::reviewCredentials(fields.ssid, fields.password);
   if (review != portal::CredError::Ok) {
     portalError = portal::credErrorText(review);
-    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(400, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   strncpy(offeredSsid, fields.ssid.c_str(), sizeof(offeredSsid) - 1);
@@ -393,7 +408,7 @@ static void dispatchPortalRequest() {
       portal::parseRequestLine(portalRequest.substr(0, firstLineEnd));
   if (!line.ok) {
     portalError = "Unsupported request.";
-    portalReply(400, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(400, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   if (!line.isPost) {
@@ -407,17 +422,17 @@ static void dispatchPortalRequest() {
       return;
     }
     // GET any path returns the form page, so OS probe URLs land on it.
-    portalReply(200, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(200, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   if (line.path != "/save") {
     portalReply(405, "text/html; charset=utf-8",
-                portal_page::formPage("Unsupported method or path."));
+                renderPortalForm("Unsupported method or path."));
     return;
   }
   if (portalPhase == PortalPhase::Validating) {
     portalReply(503, "text/html; charset=utf-8",
-                portal_page::formPage("Already validating. Wait a moment."));
+                renderPortalForm("Already validating. Wait a moment."));
     return;
   }
   beginPortalValidation(portalRequest.data() + portalHeaderEnd,
@@ -446,6 +461,8 @@ static void pollPortal() {
       concludePortalValidation(false);
       return;
     }
+    // R4: the validating client stays open — its reply is the conclusion above.
+    return;
   }
   if (!portalClient) {
     portalClient = portalServer.available();
@@ -456,7 +473,7 @@ static void pollPortal() {
   }
   if (uint32_t(now - portalRequestStarted) > REQUEST_TIMEOUT_MS) {
     portalError = "Request timed out.";
-    portalReply(408, "text/html; charset=utf-8", portal_page::formPage(portalError));
+    portalReply(408, "text/html; charset=utf-8", renderPortalForm(portalError));
     return;
   }
   for (size_t budget = 0; budget < 1024 && portalClient.available(); ++budget) {
@@ -468,7 +485,7 @@ static void pollPortal() {
       if (end == std::string::npos) {
         if (portalRequest.size() > 4096) {
           portalError = "Request too large.";
-          portalReply(431, "text/html; charset=utf-8", portal_page::formPage(portalError));
+          portalReply(431, "text/html; charset=utf-8", renderPortalForm(portalError));
           return;
         }
         continue;
@@ -487,12 +504,12 @@ static void pollPortal() {
       const long contentLength = parsePortalContentLength(portalRequest.substr(0, portalHeaderEnd));
       if (contentLength < 0) {
         portalError = "Missing content length.";
-        portalReply(411, "text/html; charset=utf-8", portal_page::formPage(portalError));
+        portalReply(411, "text/html; charset=utf-8", renderPortalForm(portalError));
         return;
       }
       if (contentLength > 255) { // ssid + password bound, with margin
         portalError = "Form data too large.";
-        portalReply(413, "text/html; charset=utf-8", portal_page::formPage(portalError));
+        portalReply(413, "text/html; charset=utf-8", renderPortalForm(portalError));
         return;
       }
       portalContentLength = static_cast<size_t>(contentLength);

@@ -125,8 +125,14 @@ void runPolicyScript() {
         std::cout << "form error\n";
       } else {
         std::cout << "form ssid=" << escape(fields.ssid)
-                  << " pass=" << escape(fields.password) << '\n';
+                  << " pass=" << escape(fields.password);
+        if (!fields.token.empty()) std::cout << " token=" << escape(fields.token);
+        std::cout << '\n';
       }
+    } else if (cmd == "token") {
+      std::string expectedHex, offeredHex;
+      args >> expectedHex >> offeredHex;
+      std::cout << (portal::tokenMatches(unhex(expectedHex), unhex(offeredHex)) ? "token match\n" : "token reject\n");
     } else if (cmd == "pass") {
       uint32_t seed = 0;
       args >> seed;
@@ -144,11 +150,11 @@ void runPageScript() {
   std::string line;
   while (std::getline(std::cin, line)) {
     std::istringstream args(line);
-    std::string cmd, errorHex;
-    args >> cmd >> errorHex;
+    std::string cmd, errorHex, tokenHex;
+    args >> cmd >> errorHex >> tokenHex;
     if (cmd == "page") {
       const std::string error = unhex(errorHex);
-      std::cout << "page " << escape(portal_page::formPage(error)) << '\n';
+      std::cout << "page " << escape(portal_page::formPage(error, unhex(tokenHex))) << '\n';
     }
   }
 }

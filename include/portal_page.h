@@ -31,7 +31,7 @@ inline std::string escapeHtml(const std::string &raw) {
 // /generate_204 land on it and trigger the captive-portal prompt); after a
 // failed save, `error` re-renders inside a visible error block. Inputs are
 // never pre-filled.
-inline std::string formPage(const std::string &error = "") {
+inline std::string formPage(const std::string &error = "", const std::string &token = "") {
   std::string page =
       "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -45,8 +45,9 @@ inline std::string formPage(const std::string &error = "") {
       "<h1>gentle-matrix</h1>"
       "<p>Choose the Wi-Fi network this display should join.</p>";
   if (!error.empty()) page += "<p class=\"error\">" + escapeHtml(error) + "</p>";
+  page += "<form method=\"POST\" action=\"/save\">";
+  if (!token.empty()) page += "<input type=\"hidden\" name=\"token\" value=\"" + escapeHtml(token) + "\">";
   page +=
-      "<form method=\"POST\" action=\"/save\">"
       "<input name=\"ssid\" maxlength=\"32\" autocapitalize=\"off\" "
       "autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" "
       "placeholder=\"Network name (SSID)\" required>"

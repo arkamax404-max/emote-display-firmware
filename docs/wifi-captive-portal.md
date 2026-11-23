@@ -116,6 +116,17 @@ the station server is not listening. The station's HTTP routes, mDNS and
 - During validation the panel shows `TRY WIFI / CHECK`; on successful save
   `WIFI / SAVING` until the restart.
 
+## Residual risk: the passphrase crosses the air in the clear
+
+The home-network passphrase crosses a **plaintext HTTP form** (no TLS): the
+WPA2 link is protected by the PSK displayed on the panel, so **anyone in
+radio range who can read the panel can join the AP and decrypt that
+submission**; no firmware change removes this. The CSRF token protects the
+form's integrity, not its confidentiality — **no** protection here.
+
+**Operational guidance:** configure the board only where the panel is not
+visible to others; otherwise provision over **USB** (`scripts/provision_wifi.py`).
+
 ## Recovery
 
 - A bad save never bricks the board: the stored credentials are untouched

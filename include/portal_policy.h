@@ -147,6 +147,14 @@ inline CredError reviewCredentials(const std::string &ssid,
   return CredError::Ok;
 }
 
+inline bool tokenMatches(const std::string &expected, const std::string &offered) {
+  if (expected.empty() || expected.size() != offered.size()) return false;
+  char diff = 0;
+  for (size_t i = 0; i < expected.size(); ++i)
+    diff = static_cast<char>(diff | (expected[i] ^ offered[i]));
+  return diff == 0;
+}
+
 // Bounded portal HTTP request shaping (T2). The portal parser accepts only
 // the shapes the page emits and OS captive probes produce.
 struct RequestLine {
@@ -175,11 +183,11 @@ inline RequestLine parseRequestLine(const std::string &firstLine) {
 }
 
 // application/x-www-form-urlencoded body of POST /save: exactly the two
-// known keys `ssid` and `password` (each present at most once, no unknown
-// keys), '+' is a space and %XX requires two hex digits.
+// form keys `ssid` and `password` plus the optional CSRF `token` (each at
+// most once, no unknown keys), '+' is a space and %XX requires two hex digits.
 struct FormFields {
   bool ok = false;
-  std::string ssid, password;
+  std::string ssid, password, token;
 };
 
 inline bool decodeUrlValue(const std::string &raw, std::string &out) {
@@ -216,7 +224,7 @@ inline bool decodeUrlValue(const std::string &raw, std::string &out) {
 inline FormFields parseForm(const char *body, size_t length) {
   FormFields result;
   const std::string input(body, length);
-  bool sawSsid = false, sawPassword = false;
+  bool sawSsid = false, sawPassword = false, sawToken = false;
   size_t start = 0;
   for (;;) {
     const size_t amp = input.find('&', start);
@@ -237,6 +245,10 @@ inline FormFields parseForm(const char *body, size_t length) {
         if (sawPassword) return result;
         result.password = value;
         sawPassword = true;
+      } else if (key == "token") {
+        if (sawToken) return result;
+        result.token = value;
+        sawToken = true;
       } else {
         return result;
       }
