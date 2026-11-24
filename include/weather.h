@@ -397,7 +397,10 @@ inline bool fetchDue(uint32_t now, bool connected, bool everAttempted,
 // --- URL and JSON text helpers ---------------------------------------------
 
 inline std::string urlEncode(const std::string &raw) {
-  static const char *const HEX = "0123456789ABCDEF";
+  // Not named HEX: Arduino's Print.h defines HEX as 16, and this header is
+  // included from the firmware, where that macro would turn the lookup into
+  // 16[b >> 4].
+  static const char *const kHexDigits = "0123456789ABCDEF";
   std::string out;
   for (const char c : raw) {
     const unsigned char b = static_cast<unsigned char>(c);
@@ -408,8 +411,8 @@ inline std::string urlEncode(const std::string &raw) {
       out.push_back(c);
     } else {
       out.push_back('%');
-      out.push_back(HEX[b >> 4]);
-      out.push_back(HEX[b & 15]);
+      out.push_back(kHexDigits[b >> 4]);
+      out.push_back(kHexDigits[b & 15]);
     }
   }
   return out;

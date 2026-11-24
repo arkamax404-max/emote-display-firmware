@@ -97,36 +97,50 @@ class SettingsTests(unittest.TestCase):
                          ["setb ok p=30 s=76", "color 4800"])
 
     # --- POST /config form parsing and value review --------------------------
+    # T4a: the form now requires exactly six keys — the original three plus
+    # the clock duration, the weather duration and the temperature unit.
 
-    def test_form_parses_all_three_required_keys(self):
-        self.assertEqual(self.run_script(["form " + feed("brightness=45&clock=12h&order=GRB")]),
-                         ["form ok b=45 c=12h o=GRB"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=80&clock=24h&order=rgb")]),
-                         ["form ok b=80 c=24h o=rgb"])
+    def test_form_parses_all_six_required_keys(self):
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=45&clock=12h&order=GRB&clocksecs=20&weathersecs=10&units=C")]),
+            ["form ok b=45 c=12h o=GRB s=20 w=10 u=C"])
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=80&clock=24h&order=rgb&clocksecs=120&weathersecs=5&units=F")]),
+            ["form ok b=80 c=24h o=rgb s=120 w=5 u=F"])
 
     def test_form_url_rules_mirroring_the_portal(self):
         # %XX decoding for the keys; '+' is a space; bare spaces and control
         # bytes are rejected, not coerced.
-        self.assertEqual(self.run_script(["form " + feed("brightness=%34%35&clock=12h&order=BRG")]),
-                         ["form ok b=45 c=12h o=BRG"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=+10&clock=12h&order=RGB")]),
-                         ["form ok b= 10 c=12h o=RGB"])  # '+' -> space, review rejects below
-        self.assertEqual(self.run_script(["form " + feed("brightness=1 0&clock=12h&order=RGB")]),
-                         ["form error"])
-        self.assertEqual(self.run_script(["form " + feed("brightness=10&clock=12%68&order=BGR")]),
-                         ["form ok b=10 c=12h o=BGR"])
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=%34%35&clock=12h&order=BRG&clocksecs=10&weathersecs=5&units=F")]),
+            ["form ok b=45 c=12h o=BRG s=10 w=5 u=F"])
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=+10&clock=12h&order=RGB&clocksecs=10&weathersecs=5&units=C")]),
+            ["form ok b= 10 c=12h o=RGB s=10 w=5 u=C"])  # '+' -> space, review rejects below
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=1 0&clock=12h&order=RGB&clocksecs=10&weathersecs=5&units=C")]),
+            ["form error"])
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=10&clock=12%68&order=BGR&clocksecs=10&weathersecs=5&units=C")]),
+            ["form ok b=10 c=12h o=BGR s=10 w=5 u=C"])
 
     def test_form_rejects_missing_unknown_and_duplicate_keys(self):
-        for body in ("brightness=45&clock=12h",  # the order key is missing
-                     "clock=12h&order=RGB", "brightness=45&order=RGB", "order=RGB", "",
-                     "brightness=45&clock=12h&extra=1",
-                     "brightness=45&brightness=45&clock=12h&order=RGB",
-                     "clock=12h&clock=24h&brightness=45&order=RGB",
-                     "brightness=45&clock=12h&order=RGB&order=RBG",
-                     "brightness45=45&clock=12h&order=RGB", "brightness",
-                     "brightness=45&clock=24h&clock=24h&order=RGB"):
+        complete = "brightness=45&clock=12h&order=RGB&clocksecs=20&weathersecs=10&units=C"
+        pairs = [complete.replace("brightness=45&", ""),           # missing brightness
+                 complete.replace("clock=12h&", ""),               # missing clock
+                 complete.replace("order=RGB&", ""),               # missing order
+                 complete.replace("clocksecs=20&", ""),            # missing clocksecs
+                 complete.replace("weathersecs=10&", ""),          # missing weathersecs
+                 complete.replace("&units=C", ""),                 # missing units
+                 complete.replace("clocksecs=20", "clocksecs=20&extra=1"),
+                 complete.replace("order=RGB", "order=RGB&order=RBG"),
+                 complete.replace("units=C", "units=C&units=F"),
+                 complete.replace("brightness=45", "brightness45=45"),
+                 complete.replace("clocksecs=20", "clocksecs=20&clocksecs=30")]
+        for body in pairs + ["", "brightness"]:
             with self.subTest(body=body):
-                self.assertEqual(self.run_script(["form " + feed(body)]), ["form error"])
+                self.assertEqual(self.run_script(["form " + feed(body)]),
+                                 ["form error"])
 
     def test_brightness_review_is_the_documented_allowed_set(self):
         for value, ok in (("25", 25), ("30", 30), ("75", 75), ("80", 80),
@@ -474,5 +488,316 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertIn("preferences_.getUChar(key, 255)", source)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class WeatherSettingsTests(SettingsTests):
+    """T4a (S1-S4, S6): the weather settings surface of /config — the
+    persisted duration, unit and city keys with their verified
+    transactions, the page extensions and the city-search intake. Inherits
+    the compile/run helpers of the panel-settings suite."""
+
+    # --- the exact allowed sets, reviewed from the form values ---------------
+
+    def test_seconds_review_is_exactly_the_documented_set(self):
+        valid = {5 + 5 * step for step in range(24)}
+        lines, expected = [], []
+        for value in [str(n) for n in range(0, 130)] + ["0005", "020", "",
+                                                        "abc", " 5", "-5",
+                                                        "5x", "1200", "1 5"]:
+            lines.append("seconds " + feed(value))
+            parsed = int(value) if value.isdigit() and len(value) <= 3 else None
+            if parsed is not None and parsed in valid:
+                expected.append("seconds ok %d" % parsed)
+            else:
+                expected.append("seconds error")
+        self.assertEqual(self.run_script(lines), expected)
+
+    def test_second_boundaries(self):
+        # 5 and 120 are inside; 4 and 121 are just outside; 125 is beyond.
+        self.assertEqual(self.run_script(["seconds " + feed("5"),
+                                          "seconds " + feed("120"),
+                                          "seconds " + feed("4"),
+                                          "seconds " + feed("121"),
+                                          "seconds " + feed("125")]),
+                         ["seconds ok 5", "seconds ok 120", "seconds error",
+                          "seconds error", "seconds error"])
+
+    def test_unit_review_accepts_exactly_C_and_F(self):
+        for value, out in (("C", "unitsrev ok C"), ("F", "unitsrev ok F"),
+                           ("c", "unitsrev error"), ("f", "unitsrev error"),
+                           ("0", "unitsrev error"), ("1", "unitsrev error"),
+                           ("", "unitsrev error"), ("CF", "unitsrev error"),
+                           (" C", "unitsrev error"), ("24h", "unitsrev error")):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_script(["unitsrev " + feed(value)]), [out])
+
+    # --- stored values outside their sets fall back to the defaults ----------
+
+    def test_stored_durations_fall_back_to_their_defaults(self):
+        self.assertEqual(self.run_script(["csdef 200", "csdef 255", "csdef 0",
+                                          "csdef 60", "csdef 20", "csdef 5",
+                                          "csdef 150", "csdef 24"]),
+                         ["csdef 20", "csdef 20", "csdef 20", "csdef 60",
+                          "csdef 20", "csdef 5", "csdef 20", "csdef 20"])
+        self.assertEqual(self.run_script(["wsdef 200", "wsdef 255", "wsdef 9",
+                                          "wsdef 10", "wsdef 120", "wsdef 0",
+                                          "wsdef 30"]),
+                         ["wsdef 10", "wsdef 10", "wsdef 10", "wsdef 10",
+                          "wsdef 120", "wsdef 10", "wsdef 30"])
+
+    def test_stored_unit_falls_back_to_celsius(self):
+        self.assertEqual(self.run_script(["udef 0", "udef 1", "udef 2",
+                                          "udef 42", "udef 255"]),
+                         ["udef C", "udef F", "udef C", "udef C", "udef C"])
+
+    def test_stored_city_falls_back_to_sevilla(self):
+        # Nothing stored: the S6 default city, so a fresh board has a city.
+        self.assertEqual(self.run_script(["citydef"]),
+                         ["citydef ok lat=37382830 lon=-5973170 name=Sevilla"])
+        # A complete stored record survives byte-for-byte (the name, like
+        # every string argument to the rig, is hex-encoded).
+        self.assertEqual(
+            self.run_script(["citydef 7 40416775 -3703790 " + feed("Madrid")]),
+            ["citydef ok lat=40416775 lon=-3703790 name=Madrid"])
+        # An out-of-range coordinate, an empty name or a missing stored flag
+        # all collapse to the same default; nothing else changes (the
+        # resolved record is always a whole record).
+        self.assertEqual(self.run_script(["citydef 7 90000001 -5973170 " + feed("x"),
+                                          "citydef 7 37382830 -180999999 " + feed("x"),
+                                          "citydef 7 37382830 -5973170 -",
+                                          "citydef 0 1 2 " + feed("x")]),
+                         ["citydef ok lat=37382830 lon=-5973170 name=Sevilla"] * 4)
+        # A stored name is re-clamped on load, UTF-8-safely: 23 letters plus
+        # the two-byte N-tilde exceed the 24-byte bound, so the pair goes
+        # whole and the name ends at the letters.
+        self.assertEqual(self.run_script(
+            ["citydef 7 37382830 -5973170 " + feed("abcdefghijklmnopqrstuvw\xc3\xb1")]),
+            ["citydef ok lat=37382830 lon=-5973170 name=abcdefghijklmnopqrstuvw"])
+
+    # --- the settings transaction over the three uchar keys ------------------
+
+    def run_storew(self, present, fail, secs=60, weather=30, unit=1):
+        return self.run_script([f"storew {present} {fail} {secs} {weather} {unit}"])[0]
+
+    def test_storew_success_persists_all_three_values(self):
+        self.assertEqual(self.run_storew(7, 0), "storew ok s=60 w=30 u=1")
+        self.assertEqual(self.run_storew(7, 0, 5, 120, 0), "storew ok s=5 w=120 u=0")
+
+    def test_storew_failed_commit_restores_the_exact_previous_triple(self):
+        # Stored (20, 10, 0), offered (60, 30, F); the weathersecs commit
+        # cannot be persisted: read-back decides, the rollback restores all
+        # three keys and the call reports failure with the exact snapshot.
+        self.assertEqual(self.run_storew(7, 16), "storew fail s=20 w=10 u=0")
+        # A lying commit write is caught by read-back the same way.
+        self.assertEqual(self.run_storew(7, 32), "storew fail s=20 w=10 u=0")
+
+    def test_storew_rollback_removal_and_unverified_outcomes(self):
+        # Nothing stored before; the units commit fails (key u, bit 8); the
+        # rollback must leave the namespace empty.
+        self.assertEqual(self.run_storew(0, 256), "storew fail s=- w=- u=-")
+        # The same shape with a removal that does not take effect on the
+        # freshly written clocksecs (removal bit 12, next to the
+        # weathersecs commit failure bit 4): the offered clocksecs stays
+        # visible and the outcome stays unverified.
+        self.assertEqual(self.run_storew(0, 4112), "storew fail s=60 w=- u=-")
+        # A lying restore (rollback-lie on the clock key, bit 3, alongside
+        # the weathersecs commit failure, bit 4): the stored clocksecs
+        # becomes 21 (the write persisted 20^1) and the outcome stays
+        # unverified while every other key still restores exactly.
+        self.assertEqual(self.run_storew(7, 24, 20, 15, 0),
+                         "storew fail s=21 w=10 u=0")
+        # The same discipline with the clock commit itself failing (bit 0):
+        # every rollback write still runs, including the lying one.
+        self.assertEqual(self.run_storew(7, 25), "storew fail s=21 w=10 u=0")
+
+    # --- the city transaction over the typed keys -----------------------------
+
+    def run_storec(self, present, fail, lat=40416775, lon=-3703790,
+                   name="Madrid"):
+        line = f"storec {present} {fail} {lat} {lon} " + feed(name)
+        return self.run_script([line])[0]
+
+    def test_storec_success_persists_the_whole_record(self):
+        self.assertEqual(self.run_storec(7, 0),
+                         "storec ok lat=40416775 lon=-3703790 name=Madrid")
+        self.assertEqual(self.run_storec(7, 0, -5973170, 37382830, "Sevilla"),
+                         "storec ok lat=-5973170 lon=37382830 name=Sevilla")
+
+    def test_storec_failed_commit_restores_the_exact_previous_record(self):
+        # Stored Sevilla, offered Madrid; the citylon commit cannot be
+        # persisted (key lon, bit 4): the rollback restores all three keys,
+        # including the exact previous STRING, and reports failure.
+        self.assertEqual(self.run_storec(7, 16),
+                         "storec fail lat=37382830 lon=-5973170 name=Sevilla")
+        # The cityname commit cannot be persisted (key name, bit 8).
+        self.assertEqual(self.run_storec(7, 256),
+                         "storec fail lat=37382830 lon=-5973170 name=Sevilla")
+
+    def test_storec_lies_and_rollback_restores(self):
+        # A lying string commit (name kept as 'MadridX', bit 9) is caught
+        # by read-back and the exact previous record comes back.
+        self.assertEqual(self.run_storec(7, 512),
+                         "storec fail lat=37382830 lon=-5973170 name=Sevilla")
+        # A restore that cannot take effect (citylat commit noop, bit 0,
+        # plus the cityname restore noop, bit 10) keeps the offered name
+        # visible and the transaction unverified; the int keys still
+        # restore faithfully (the citylat restore has nothing to change,
+        # the citylon restore lands exactly).
+        self.assertEqual(self.run_storec(7, 1025),
+                         "storec fail lat=37382830 lon=-5973170 name=Madrid")
+        # Nothing stored before; the cityname commit fails; the rollback
+        # leaves the namespace empty.
+        self.assertEqual(self.run_storec(0, 256),
+                         "storec fail lat=- lon=- name=-")
+        # A removal that does not take effect (removal citylat, bit 12,
+        # plus cityname commit noop, bit 8) keeps the offered latitude
+        # visible and stays unverified.
+        self.assertEqual(self.run_storec(0, 4352),
+                         "storec fail lat=40416775 lon=- name=-")
+
+    # --- the /config page extensions ------------------------------------------
+
+    def test_pagecarries_the_new_controls_preselected(self):
+        out = self.run_script(["pagew 65 12h BRG C 60 30 " + feed("Sevilla")
+                               + " -"])[0]
+        # The two duration selects with every allowed value, current one
+        # selected, labelled in seconds.
+        self.assertIn('name="clocksecs"', out)
+        self.assertIn('name="weathersecs"', out)
+        for seconds in range(5, 121, 5):
+            self.assertIn(f'value="{seconds}"', out)
+        self.assertIn('value="60" selected', out)
+        self.assertIn('value="30" selected', out)
+        self.assertIn('value="120"', out)
+        self.assertIn("seconds", out)
+        # The unit select: C default and F, current preselected.
+        self.assertIn('name="units"', out)
+        self.assertIn('value="C" selected', out)
+        self.assertIn('value="F">', out)
+        # The city search has its own form, its own route, a bounded field
+        # and the current city shown; the page states the resolved-city rule.
+        self.assertIn('action="/config/city"', out)
+        self.assertIn('method="POST"', out)
+        self.assertIn('name="city"', out)
+        self.assertIn('maxlength="64"', out)
+        self.assertIn("Sevilla", out)
+        self.assertIn("resolved city", out)
+
+    def test_page_preselects_fahrenheit_and_escapes_city_markup(self):
+        out = self.run_script(["pagew 30 24h RGB F 20 10 "
+                               + feed("<x>&") + " -"])[0]
+        self.assertIn('value="F" selected', out)
+        self.assertIn('value="C">', out)
+        self.assertIn('&lt;x&gt;&amp;', out)
+
+    def test_page_error_block_still_escapes(self):
+        out = self.run_script(["pagew 80 24h RGB C 20 10 " + feed("madrid")
+                               + " " + feed("<e>")])[0]
+        self.assertIn("&lt;e&gt;", out)
+
+    def test_old_page_command_still_renders_every_control(self):
+        # PRESERVE: the previous signature keeps rendering the full extended
+        # page, preselecting the defaults (Celsius, 20 s / 10 s, Sevilla).
+        out = self.run_script(["page 30 24h RGB -"])[0]
+        self.assertIn('name="clocksecs"', out)
+        self.assertIn('name="weathersecs"', out)
+        self.assertIn('name="units"', out)
+        self.assertIn('value="30" selected', out)  # brightness
+        self.assertIn('value="C" selected', out)
+        self.assertIn('value="20" selected', out)
+        self.assertIn('value="10" selected', out)
+        self.assertIn("Sevilla", out)
+
+    # --- the city-search intake -----------------------------------------------
+
+    def test_city_route_classified_on_the_exact_post_lines(self):
+        self.assertEqual(self.run_script(["route " + feed("POST /config/city HTTP/1.1")]),
+                         ["route city"])
+        self.assertEqual(self.run_script(["route " + feed("POST /config/city HTTP/1.0")]),
+                         ["route city"])
+        for line in ("GET /config/city HTTP/1.1",
+                     "POST /config/cit HTTP/1.1", "POST /Config/city HTTP/1.1",
+                     "POST /config/city", "post /config/city HTTP/1.1"):
+            self.assertEqual(self.run_script(["route " + feed(line)]), ["route other"])
+
+    def test_only_a_single_city_field_is_parsed(self):
+        self.assertEqual(self.run_script(["cityform " + feed("city=Madrid")]),
+                         ["cityform ok city=Madrid"])
+        # The UTF-8 bytes print escaped by the rig (\xc3\xb1 for ñ).
+        self.assertEqual(
+            self.run_script(["cityform " + feed("city=A%20Coru%C3%B1a")]),
+            ["cityform ok city=A Coru\\xc3\\xb1a"])
+        # An EMPTY value still parses (the shared URL rules accept it, like
+        # an empty open-network password); the review below rejects it.
+        self.assertEqual(self.run_script(["cityform " + feed("city=")]),
+                         ["cityform ok city="])
+        for body in ("", "city", "city=A&city=B", "name=Madrid",
+                     "city=A&extra", "city=%2", "city=A B"):
+            with self.subTest(body=body):
+                self.assertEqual(self.run_script(["cityform " + feed(body)]),
+                                 ["cityform error"], body)
+
+    def test_city_search_rejected_before_any_request_could_run(self):
+        # The review is the FIRST decision on a submitted name: empty,
+        # oversized (the 64-byte query bound) names never reach the
+        # transport; the review itself is pure, so 'no request' is
+        # structural here and the transport check lives in weather_fetch.
+        self.assertEqual(self.run_script(["citysearch " + feed("")]),
+                         ["citysearch error"])
+        self.assertEqual(
+            self.run_script(["citysearch " + feed("x" * 65)]),
+            ["citysearch error"])
+        self.assertEqual(self.run_script(["citysearch " + feed("x" * 64)]),
+                         ["citysearch ready"])
+        self.assertEqual(
+            self.run_script(["citysearch " + feed("Sevilla")]),
+            ["citysearch ready"])
+
+    # --- the geocoding result -> stored city -----------------------------------
+
+    def test_geocoding_result_becomes_the_stored_record(self):
+        body = feed('{"results":[{"name":"Madrid","latitude":40.416775,'
+                    '"longitude":-3.70379,"country_code":"ES"}]}')
+        self.assertEqual(self.run_script(["cityfrom 200 " + body]),
+                         ["cityfrom ok lat=40416775 lon=-3703790 name=Madrid"])
+
+    def test_stored_name_is_clamped_utf8_safely(self):
+        # The raw UTF-8 bytes of the N-tilde (the JSON source would need the
+        # \u00f1 escape, which the committed parseCity rejects by design).
+        body = feed('{"results":[{"name":"abcdefghijklmnopqrstuvw\xc3\xb1x",'
+                    '"latitude":40.4,"longitude":-3.7}]}')
+        # 23 ASCII letters + the two-byte N-tilde = 25 bytes; the trailing
+        # 'x' would exceed the bound, so the whole name is cut at 23 and
+        # the sequence never tears.
+        self.assertEqual(self.run_script(["cityfrom 200 " + body]),
+                         ["cityfrom ok lat=40400000 lon=-3700000 "
+                          "name=abcdefghijklmnopqrstuvw"])
+
+    def test_geocoding_failures_report_error_never_partial(self):
+        # Every failure reports error; the caller keeps its previous record
+        # because cityFromResponse only writes on success (the committed
+        # parseCity contract guarantees the untouched record, and the
+        # response discipline sits in front of it).
+        cases = [(503, feed('{"results":[{"name":"Madrid","latitude":40.4,'
+                            '"longitude":-3.7}]}')),  # bad status
+                 (200, feed("")),                    # empty body
+                 (200, feed("{}")),
+                 (200, feed('{"error":true,"reason":"..."}')),
+                 (200, feed('{"results":[]}')),      # unknown city
+                 (200, "x" * (4097 * 2)),            # oversized body
+                 (-1, feed('{"results":[{"name":"X","latitude":40.4,'
+                           '"longitude":-3.7}]}'))]  # transport error
+        for status, body in cases:
+            with self.subTest(status=status, body=len(body)):
+                self.assertEqual(self.run_script([f"cityfrom {status} " + body]),
+                                 ["cityfrom error"])
+
+    def test_reset_scope_stays_exactly_untouched_by_the_weather_keys(self):
+        # None of the six new keys is ever in the DOWN-reset scope.
+        reset = (ROOT / "include/wifi_credentials_reset.h").read_text()
+        # Read-only report: the reset scope is defined by its own header and
+        # unchanged; this pin documents the promise for the new keys.
+        self.assertNotIn('"clocksecs"', reset)
+        self.assertNotIn('"weathersecs"', reset)
+        self.assertNotIn('"units"', reset)
+        self.assertNotIn('"citylat"', reset)
+        self.assertNotIn('"citylon"', reset)
+        self.assertNotIn('"cityname"', reset)
