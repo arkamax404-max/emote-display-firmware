@@ -6,12 +6,14 @@ namespace panel {
 // stored as a whole percent and every drawing path — the clock, the
 // messages, the version footer, the diagnostic overlay and the received PNG
 // frames — shares one scaling through the single color() helper below.
-// Range 10..80 percent in steps of 5, default 30 (the user's conservative
-// default); percent * 255 / 100 is the channel scale, so the 30 % default
+// Range 25..80 percent in steps of 5, default 30 (the user's conservative
+// default). The floor is 25 %: below it some colours stop being visible on
+// the panel, so darker values are rejected rather than offered.
+// percent * 255 / 100 is the channel scale, so the 30 % default
 // (scale 76) stays in the same order of magnitude as the previous
 // compile-time constant 64/255. The scale is capped at 255 and by itself
 // never saturates a full channel above the requested percentage.
-constexpr uint8_t BRIGHTNESS_MIN_PERCENT = 10;
+constexpr uint8_t BRIGHTNESS_MIN_PERCENT = 25;
 constexpr uint8_t BRIGHTNESS_MAX_PERCENT = 80;
 constexpr uint8_t BRIGHTNESS_STEP_PERCENT = 5;
 constexpr uint8_t BRIGHTNESS_DEFAULT_PERCENT = 30;

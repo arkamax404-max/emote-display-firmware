@@ -3,8 +3,9 @@
 #include <initializer_list>
 
 int main() {
-  // S10: brightness is a runtime percent, range 10..80 step 5, default 30.
-  assert(panel::BRIGHTNESS_MIN_PERCENT == 10);
+  // S10: brightness is a runtime percent, range 25..80 step 5, default 30.
+  // The 25 % floor exists because below it some colours stop being visible.
+  assert(panel::BRIGHTNESS_MIN_PERCENT == 25);
   assert(panel::BRIGHTNESS_MAX_PERCENT == 80);
   assert(panel::BRIGHTNESS_STEP_PERCENT == 5);
   assert(panel::BRIGHTNESS_DEFAULT_PERCENT == 30);
@@ -15,11 +16,11 @@ int main() {
   assert(panel::brightnessScale() == 30u * 255u / 100u);
   // Exactly the allowed set is valid.
   for (unsigned percent = 0; percent <= 255; ++percent) {
-    const bool allowed = percent >= 10 && percent <= 80 && (percent - 10) % 5 == 0;
+    const bool allowed = percent >= 25 && percent <= 80 && (percent - 25) % 5 == 0;
     assert(panel::validBrightnessPercent(static_cast<uint8_t>(percent)) == allowed);
   }
   // Every valid percent maps exactly by the rule (truncating, no rounding).
-  for (unsigned percent = 10; percent <= 80; percent += 5)
+  for (unsigned percent = 25; percent <= 80; percent += 5)
     assert(panel::brightnessScaleFromPercent(static_cast<uint8_t>(percent)) ==
            percent * 255 / 100);
   // The setter applies valid values; invalid ones are rejected with the

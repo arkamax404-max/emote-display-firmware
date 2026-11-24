@@ -241,7 +241,8 @@ brightness, clock format and the S7 panel channel order. Brightness and clock
 format need no restart to take effect; a changed channel order does (the
 display driver fixes its pins at construction) (S8):
 
-- **Brightness (S10)**: percent from **10 to 80 in steps of 5**, default
+- **Brightness (S10)**: percent from **25 to 80 in steps of 5** (the floor is
+  25 % because below it some colours stop being visible), default
   **30 %**. A runtime value applied through ONE setter; every drawing layer
   (clock, messages, version footer, diagnostic overlay, received PNGs)
   scales through it with `percent * 255 / 100` (30 % = 76, the era of the

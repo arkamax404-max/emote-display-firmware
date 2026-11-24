@@ -68,13 +68,13 @@ class SettingsTests(unittest.TestCase):
 
     def test_every_valid_percent_maps_exactly(self):
         lines, expected = [], []
-        for percent in range(10, 81, 5):
+        for percent in range(25, 81, 5):
             lines.append(f"scale {percent}")
             expected.append(f"scale {percent * 255 // 100}")
         self.assertEqual(self.run_script(lines), expected)
 
     def test_exactly_the_allowed_set_validates(self):
-        valid = {10 + 5 * step for step in range(15)}
+        valid = {25 + 5 * step for step in range(12)}
         lines = [f"valid {percent}" for percent in range(256)]
         self.assertEqual(self.run_script(lines),
                          [f"valid {1 if percent in valid else 0}"
@@ -129,8 +129,9 @@ class SettingsTests(unittest.TestCase):
                 self.assertEqual(self.run_script(["form " + feed(body)]), ["form error"])
 
     def test_brightness_review_is_the_documented_allowed_set(self):
-        for value, ok in (("10", 10), ("15", 15), ("75", 75), ("80", 80),
-                          ("030", 30), ("9", None), ("76", None), ("81", None), ("85", None),
+        for value, ok in (("25", 25), ("30", 30), ("75", 75), ("80", 80),
+                          ("030", 30), ("10", None), ("15", None), ("20", None),
+                          ("9", None), ("76", None), ("81", None), ("85", None),
                           ("", None), ("999", None), ("1x0", None), (" 10", None),
                           ("abc", None), ("-10", None)):
             with self.subTest(value=value):
@@ -203,10 +204,10 @@ class SettingsTests(unittest.TestCase):
         out = self.run_script(["page 30 24h RGB -"])[0]
         self.assertIn('action="/config"', out)
         self.assertIn('method="POST"', out)
-        for percent in range(10, 81, 5):
+        for percent in range(25, 81, 5):
             self.assertIn(f'value="{percent}"', out)
         self.assertIn('value="30" selected', out)
-        self.assertNotIn('value="10" selected', out)
+        self.assertNotIn('value="25" selected', out)
         self.assertIn('value="24h" selected', out)
         self.assertIn('value="12h">', out)
         # The panel channel order (S7): all six named permutations, the
