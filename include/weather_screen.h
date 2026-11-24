@@ -6,27 +6,27 @@
 #include <ctime>
 
 // Weather screen renderer (T2): the forecast grid over the whole 64x64
-// canvas — a 1 px vertical divider in column 32 and a 1 px horizontal
-// divider in row 32 in the muted ink, and the four cells (today top left,
-// +1 top right, +2 bottom left, +3 bottom right), each showing its
-// three-letter day label with the precipitation probability NN%
-// right-aligned on the very same top row (S7), then the maximum at scale 2
-// and the minimum at scale 2 (same size; the maximum is the primary
-// figure), and the S8 8x8 icon for the day's WMO weather code beside the
-// temperature block when both figures fit. All text is drawn through the
-// same 3x5 glyph table and text() helper the clock uses; the icons use the
-// same plot discipline with a small row-byte table of their own. Colors
-// leave this renderer raw 565; the pixel callback applies the shared
-// brightness helper panel::color() exactly like every idle_clock::draw call
-// site, so the whole screen dims with the panel setting. No Arduino/WiFi
-// symbols.
+// canvas — four cells (today top left, +1 top right, +2 bottom left, +3
+// bottom right) separated by whitespace only (S9 removed the two divider
+// lines), each showing its three-letter day label with the precipitation
+// probability NN% right-aligned on the very same top row (S7), then the
+// maximum at scale 2 and the minimum at scale 2 (same size; the maximum
+// is the primary figure), and the S8 8x8 icon for the day's WMO weather
+// code beside the temperature block when both figures fit. A negative
+// figure loses its minus glyph and is painted in intense blue (S9): the
+// colour carries the sign. All text is drawn through the same 3x5 glyph
+// table and text() helper the clock uses; the icons use the same plot
+// discipline with a small row-byte table of their own. Colors leave this
+// renderer raw 565; the pixel callback applies the shared brightness
+// helper panel::color() exactly like every idle_clock::draw call site, so
+// the whole screen dims with the panel setting. No Arduino/WiFi symbols.
 namespace weather_screen {
 
-// Geometry fixed by the spec (S1): the dividers cross at (32, 32); each
-// cell owns a 31x31 content area anchored at its origin, so the spare
-// column 31/row 31 keeps every glyph clear of the divider even when a
-// value fills its cell completely.
-constexpr int DIVIDER = 32;
+// Geometry fixed by the spec (S1): the four cells sit on the canvas with
+// an empty crossing at (32, 32) — S9 removed the two separator lines, so
+// nothing is ever drawn there. Each cell still owns a 31x31 content area
+// anchored at its origin; the empty column 31 and the empty crossing of
+// column 32/row 32 keep every cell clear of its neighbours.
 constexpr int CELL = 31;
 constexpr int RIGHT_X = 33;  // left edge of the two right-hand cells
 constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
@@ -34,20 +34,26 @@ constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
 // Row offsets inside a cell (S7): label y+0 (scale 1) with the probability
 // right-aligned on that same row (the '%' ends at the cell's own edge,
 // column x0+30); maximum y+7 and minimum y+19, both at scale 2. The icon
-// (S8) occupies the last eight columns x0+23..x0+30 — the same right
-// anchor as the probability — and the vertical middle rows y0+14..y0+21.
-// The last painted row is y+28, one row short of the region end.
+// (S8, moved 4 px left by S9) occupies the eight columns x0+19..x0+26
+// over the vertical middle rows y0+14..y0+21. The last painted row is
+// y+28, one row short of the region end.
 constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19;
 constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 2;
-constexpr int ICON_X = 23, ICON_Y = 14;
+constexpr int ICON_X = 19, ICON_Y = 14;
 
-// Inks: the dividers are the muted ink (S1); the cell palette mirrors the
-// clock — white headline maximum, blue minimum, amber label row
-// probability, muted day labels.
-constexpr uint16_t INK_DIVIDER = idle_clock::MUTED;
-constexpr uint16_t INK_LABEL = idle_clock::MUTED;
+// Inks (S9): a positive maximum is the white headline; the positive
+// minimum is the MUTED ink — blue used to mean "minimum", but now the
+// colour must mean the SIGN, so an unambiguous intense blue is reserved
+// for negative figures (drawn without a minus glyph). The muted minimum
+// still reads as the secondary figure through its lower brightness; the
+// minus-glyph drop is the derived consequence the user did not ask for
+// explicitly (see the task record).
 constexpr uint16_t INK_MAX = idle_clock::WHITE;
-constexpr uint16_t INK_MIN = idle_clock::BLUE;
+constexpr uint16_t INK_MIN = idle_clock::MUTED;
+constexpr uint16_t INK_NEG =
+    idle_clock::rgb(64, 64, 255); // intense blue, not the clock's sky blue
+
+constexpr uint16_t INK_LABEL = idle_clock::MUTED;
 constexpr uint16_t INK_PROB = idle_clock::AMBER;
 
 // The clock glyph table has no percent sign, and the table is shared with
@@ -146,27 +152,34 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
     for (int col = 0; col < 3; ++col)
       if (PCT[row] & (4 >> col))
         plot(px + col, y0 + DY_LABEL + row, INK_PROB);
-  // S7: both temperatures at scale 2 — the maximum is the headline value
-  // (white) and the minimum (blue) is the same size right below it.
-  std::snprintf(buffer, sizeof buffer, "%d",
-                weather::roundedDegrees(weather::displayedTenths(
-                    forecast.tmax[index], forecast.unit, shown)));
-  put(buffer, DY_MAX, SCALE_MAX, INK_MAX);
+  // S7: both temperatures at scale 2 — the maximum is the primary value.
+  // S9: a negative figure is drawn WITHOUT the minus glyph, in intense
+  // blue; a positive maximum stays white and the positive minimum is
+  // muted, so the colour alone carries the sign at a glance.
+  int value = weather::roundedDegrees(weather::displayedTenths(
+      forecast.tmax[index], forecast.unit, shown));
+  const bool maxNegative = value < 0;
+  std::snprintf(buffer, sizeof buffer, "%u",
+                static_cast<unsigned>(maxNegative ? -value : value));
+  put(buffer, DY_MAX, SCALE_MAX, maxNegative ? INK_NEG : INK_MAX);
   const size_t maxChars = std::strlen(buffer);
-  std::snprintf(buffer, sizeof buffer, "%d",
-                weather::roundedDegrees(weather::displayedTenths(
-                    forecast.tmin[index], forecast.unit, shown)));
-  put(buffer, DY_MIN, SCALE_MIN, INK_MIN);
+  value = weather::roundedDegrees(weather::displayedTenths(
+      forecast.tmin[index], forecast.unit, shown));
+  const bool minNegative = value < 0;
+  std::snprintf(buffer, sizeof buffer, "%u",
+                static_cast<unsigned>(minNegative ? -value : value));
+  put(buffer, DY_MIN, SCALE_MIN, minNegative ? INK_NEG : INK_MIN);
   const size_t minChars = std::strlen(buffer);
-  // S8: the 8x8 icon for the day's WMO code, right-anchored like the
-  // probability and vertically centred on the temperature block. It is
-  // drawn only when BOTH numbers fit beside it: at scale 2 a figure wider
-  // than two characters (any three-digit magnitude, or a two-digit one
-  // written with its sign, which is a glyph cell of its own) leaves fewer
-  // than two clear columns before the slot, so in that cell the icon is
-  // omitted and the FULL number is kept — a temperature is never truncated
-  // to make room for the icon. The unknown group (a code outside every
-  // group) has no bitmap and simply shows no icon.
+  // S8: the 8x8 icon for the day's WMO code, 4 px further left than the
+  // first revision (S9), right-anchored in its slot and vertically
+  // centred on the temperature block. It is drawn only when BOTH numbers
+  // fit beside it: at scale 2 any figure wider than two characters (any
+  // three-digit magnitude; the sign no longer costs a glyph cell, since
+  // S9 removed it) leaves fewer than two clear columns before the slot,
+  // so in that cell the icon is omitted and the FULL number is kept — a
+  // temperature is never truncated to make room for the icon. The
+  // unknown group (a code outside every group) has no bitmap and simply
+  // shows no icon.
   const weather::Icon icon = weather::iconFor(forecast.code[index]);
   if (maxChars <= 2 && minChars <= 2 && icon != weather::Icon::Unknown) {
     const int which = static_cast<int>(icon);
@@ -181,14 +194,12 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
 // or a rejected body — the pure layer only publishes valid records) paints
 // nothing at all: the caller shows the clock instead until a forecast
 // exists, so a board without internet never flickers to an empty grid.
+// S9: no separator lines — the four cells keep the whole canvas to
+// themselves, separated by whitespace only.
 template<class Pixel>
 void draw(const weather::Forecast &forecast, weather::Unit shown,
           const std::tm &calendar, Pixel pixel) {
   if (!forecast.valid) return;
-  for (int i = 0; i < 64; ++i) {
-    pixel(i, DIVIDER, INK_DIVIDER);
-    pixel(DIVIDER, i, INK_DIVIDER);
-  }
   const int ORIGIN[4][2] = {{0, 0}, {RIGHT_X, 0}, {0, BOTTOM_Y},
                             {RIGHT_X, BOTTOM_Y}};
   for (size_t index = 0; index < 4; ++index)

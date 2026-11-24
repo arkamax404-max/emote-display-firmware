@@ -1,30 +1,37 @@
-// Host test rig for the weather screen renderer (T2, S5/S7/S8): a 64x64
+// Host test rig for the weather screen renderer (T2, S5/S7/S8/S9): a 64x64
 // uint16_t canvas painted through a pixel callback exactly like
 // idle_clock::draw, compared against an expected image built in this rig
-// from the DOCUMENTED geometry (divider column/row, the four cell origins,
-// the field offsets and scales, the truncation rule, the icon slot rule)
-// using the same idle_clock::text glyph engine — so a layout drift in
-// weather_screen.h is visible, not just "some pixels exist". Every case is
-// one invocation: weather_screen_test <case>; OK + exit 0 or
+// from the DOCUMENTED geometry (the four cell origins, the field offsets
+// and scales, the truncation rule, the icon slot rule, the sign-by-colour
+// rule) using the same idle_clock::text glyph engine — so a layout drift
+// in weather_screen.h is visible, not just "some pixels exist". Every case
+// is one invocation: weather_screen_test <case>; OK + exit 0 or
 // "line N: condition" on stderr + exit 1.
 //
-// The 8x8 icon bitmaps are pinned HERE as raw bytes — the exact-image
-// match therefore proves the renderer draws precisely these bitmaps at the
-// documented slot, not merely that the used constant matches itself.
+// The 8x8 icon bitmaps are pinned HERE as raw bytes, and the intense blue
+// of the negative figures is pinned HERE as a raw 565 word — the
+// exact-image match therefore proves the renderer draws precisely these
+// bitmaps and precisely this ink, not merely that the used constant
+// matches itself.
 //
-// Cases:
-//   dividers  the two 1 px lines own exactly their row and column
+// Cases (case id "dividers" now proves the S9 absence of separators):
+//   dividers  NO separator anywhere: row 32 and column 32 are empty in
+//             every ink, and no cell content may reach them
 //   cells     per-cell isolation: mutating one cell's inputs moves pixels
 //             only inside that cell's region; full expected image match
-//   truncation oversized values keep whole trailing characters and never
-//             reach the divider or the neighbour
+//   truncation the extreme in-range figures (±1000.0) still fit exactly
+//             and never reach the spare strip, a neighbour or row/col 32
 //   values    two-digit, three-digit, negative and zero temperatures;
 //             zero-padded NN% probabilities parked at the cell's right
-//             edge exactly on the label row (S7)
-//   icons     S7/S8 layout proofs: both temperatures the same height; the
-//             icon slot inked only when both numbers fit AND the WMO code
-//             maps; three-digit magnitudes drop the icon and keep EVERY
-//             digit; unknown codes draw no icon
+//             edge exactly on the label row (S7); negative figures in
+//             intense blue without a minus glyph, positive minimum muted
+//             (S9)
+//   icons     S7/S8/S9 layout proofs: both temperatures the same height;
+//             the icon slot 4 px further left, never touching the figures;
+//             inked only when both figures fit AND the WMO code maps;
+//             three-digit magnitudes drop the icon and keep EVERY digit;
+//             negative and positive figures of the same magnitude have
+//             the same digit widths; unknown codes draw no icon
 //   units     the shown unit converts the stored tenths without a refetch
 //   labels    HOY for today; the weekday names advance with tm_wday
 //   invalid   no valid forecast paints nothing at all (including a body
@@ -58,8 +65,9 @@ constexpr uint16_t SENTINEL = 0x5a5a;
 
 // The documented cell origins: today top left, +1 top right, +2 bottom
 // left, +3 bottom right. Each cell owns a 31x31 area [x0, x0+30] x
-// [y0, y0+30]; the empty column 31 keeps the left cells clear of the
-// divider column 32 even at full width.
+// [y0, y0+30]; the empty column 31 and the empty crossing of column 32 /
+// row 32 keep every cell clear of its neighbours (S9: no line is drawn
+// anywhere).
 struct Region { int x0, y0; };
 const Region ORIGIN[4] = {{0, 0}, {33, 0}, {0, 33}, {33, 33}};
 constexpr int REGION_SPAN = 31;
@@ -72,7 +80,8 @@ void expPixel(int x, int y, uint16_t color) {
 
 // The expected number formatting re-derives the documented rule with the
 // committed pure-layer helpers: stored tenths -> shown unit -> integer
-// degrees rounding half away from zero.
+// degrees rounding half away from zero (SIGNED text; the sign itself is
+// consumed below).
 std::string degreesText(const weather::Forecast &f, int index, bool maximum,
                         weather::Unit shown) {
   const int16_t stored = maximum ? f.tmax[index] : f.tmin[index];
@@ -81,6 +90,15 @@ std::string degreesText(const weather::Forecast &f, int index, bool maximum,
                 weather::roundedDegrees(
                     weather::displayedTenths(stored, f.unit, shown)));
   return buffer;
+}
+
+// S9: the displayed figure drops its minus glyph entirely; the colour
+// carries the sign. Returns the digit-only text and reports the sign.
+std::string degreesDigits(const weather::Forecast &f, int index, bool maximum,
+                          weather::Unit shown, bool &negative) {
+  const std::string signedText = degreesText(f, index, maximum, shown);
+  negative = !signedText.empty() && signedText[0] == '-';
+  return negative ? signedText.substr(1) : signedText;
 }
 
 // The documented probability rule: zero-padded two digits (100 keeps
@@ -118,13 +136,19 @@ const uint16_t PINNED_ICON_INK[7] = {idle_clock::AMBER, idle_clock::AMBER,
                                      idle_clock::BLUE, idle_clock::WHITE,
                                      idle_clock::AMBER};
 
+// S9: the intense blue of every negative figure, pinned RAW here (the
+// header builds it with idle_clock::rgb(64,64,255) = 0x421F — a deep
+// saturated blue, clearly distinct from the clock's sky-blue
+// rgb(85,189,232) = 0x55FD).
+constexpr uint16_t PINNED_NEG = 0x421F;
+
 void expectCell(const Region &r, const weather::Forecast &f, int index,
                 int wday, weather::Unit shown) {
   // S7 offsets: label y+0 (scale 1) with the probability right-aligned ON
   // THE SAME ROW — its '%' ends exactly at the cell's own edge, column
   // x0+30; maximum y+7 (scale 2); minimum y+19 (scale 2, same size, the
-  // maximum reads first). The icon slot is the last eight columns
-  // (x0+23..x0+30) over the vertical middle rows (y0+14..y0+21).
+  // maximum reads first). The icon slot (S9) sits eight columns wide from
+  // x0+19 to x0+26, over the vertical middle rows (y0+14..y0+21).
   idle_clock::text(weather::dayLabel(static_cast<size_t>(index), wday), r.x0,
                    r.y0 + 0, 1, idle_clock::MUTED, expPixel);
   const std::string digits = probText(f.prob[index]);
@@ -138,19 +162,23 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
       if (weather_screen::PCT[row] & (4 >> col))
         expPixel(px + col, r.y0 + 0 + row, idle_clock::AMBER);
 
-  const std::string maximum =
-      fitted(degreesText(f, index, true, shown), 2);
-  idle_clock::text(maximum.c_str(), r.x0, r.y0 + 7, 2, idle_clock::WHITE,
-                   expPixel);
-  const std::string minimum =
-      fitted(degreesText(f, index, false, shown), 2);
-  idle_clock::text(minimum.c_str(), r.x0, r.y0 + 19, 2, idle_clock::BLUE,
-                   expPixel);
+  // S9: the digits lose their sign; the ink encodes it. A negative figure
+  // (maximum or minimum) is intense blue; a positive maximum stays white
+  // and the positive minimum is muted.
+  bool maxNegative = false, minNegative = false;
+  const std::string maximum = fitted(
+      degreesDigits(f, index, true, shown, maxNegative), 2);
+  idle_clock::text(maximum.c_str(), r.x0, r.y0 + 7, 2,
+                   maxNegative ? PINNED_NEG : idle_clock::WHITE, expPixel);
+  const std::string minimum = fitted(
+      degreesDigits(f, index, false, shown, minNegative), 2);
+  idle_clock::text(minimum.c_str(), r.x0, r.y0 + 19, 2,
+                   minNegative ? PINNED_NEG : idle_clock::MUTED, expPixel);
 
-  // S8: the icon is drawn only when BOTH temperatures fit beside it (at
-  // scale 2 any three-character figure — or a two-digit one written with
-  // its sign — would collide) and the day's WMO code belongs to a group;
-  // the unknown state has no bitmap.
+  // S8 (positions per S9): the icon is drawn only when BOTH figures fit
+  // beside it — the sign no longer costs a glyph cell, so only a
+  // three-digit (or longer, fitted) figure collides — and the day's WMO
+  // code belongs to a group; the unknown state has no bitmap.
   const weather::Icon icon = weather::iconFor(f.code[index]);
   if (maximum.size() <= 2 && minimum.size() <= 2 &&
       icon != weather::Icon::Unknown) {
@@ -158,7 +186,7 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
     for (int row = 0; row < 8; ++row)
       for (int col = 0; col < 8; ++col)
         if (PINNED_ICONS[which][row] & (0x80 >> col))
-          expPixel(r.x0 + 23 + col, r.y0 + 14 + row, PINNED_ICON_INK[which]);
+          expPixel(r.x0 + 19 + col, r.y0 + 14 + row, PINNED_ICON_INK[which]);
   }
 }
 
@@ -166,10 +194,8 @@ Canvas expectDraw(const weather::Forecast &f, weather::Unit shown,
                   const std::tm &calendar) {
   expected.fill(SENTINEL);
   if (!f.valid) return expected;
-  for (int i = 0; i < 64; ++i) {
-    expected[32 * 64 + i] = idle_clock::MUTED; // horizontal divider, row 32
-    expected[i * 64 + 32] = idle_clock::MUTED; // vertical divider, column 32
-  }
+  // S9: no separator lines at all — the four cells sit on the empty
+  // canvas, separated by whitespace only.
   for (int i = 0; i < 4; ++i)
     expectCell(ORIGIN[i], f, i, calendar.tm_wday, shown);
   return expected;
@@ -197,12 +223,15 @@ bool bandHas(const Canvas &c, const Region &r, int dy, int rowspan,
   return false;
 }
 
-// The icon slot: any non-sentinel pixel inside columns x0+23..x0+30,
-// rows y0+14..y0+21.
-bool slotHasInk(const Canvas &c, int index) {
+// S9 icon slot: ink presence inside columns [x0+from..x0+to], rows
+// y0+14..y0+21. Presence probes use the whole slot 19..26; absence probes
+// may need to start past column 21 when a three-glyph figure (which the
+// drop rule keeps in full) reaches x0+21 and its band rows overlap the
+// slot rows — that ink is the FIGURE, not an icon.
+bool slotHasInk(const Canvas &c, int index, int from = 19, int to = 26) {
   const Region &r = ORIGIN[index];
   for (int y = r.y0 + 14; y < r.y0 + 22; ++y)
-    for (int x = r.x0 + 23; x < r.x0 + 31; ++x)
+    for (int x = r.x0 + from; x <= r.x0 + to; ++x)
       if (c[y * 64 + x] != SENTINEL) return true;
   return false;
 }
@@ -213,6 +242,16 @@ int rightmostOf(const Canvas &c, const Region &r, uint16_t color) {
     for (int y = r.y0; y < r.y0 + REGION_SPAN; ++y)
       if (c[y * 64 + x] == color) return x;
   return -1;
+}
+
+// The rightmost column of ANY non-sentinel pixel within one row band of
+// the cell (used for digit-width comparisons).
+int rightmostInkInBand(const Canvas &c, const Region &r, int dy, int rowspan) {
+  int rightmost = -1;
+  for (int y = r.y0 + dy; y < r.y0 + dy + rowspan; ++y)
+    for (int x = r.x0; x < r.x0 + REGION_SPAN; ++x)
+      if (c[y * 64 + x] != SENTINEL) rightmost = x;
+  return rightmost;
 }
 
 weather::Forecast makeForecast(weather::Unit unit, const int16_t tmax[],
@@ -253,24 +292,17 @@ int main(int argc, char **argv) {
     const std::tm calendar = makeCalendar(4); // JUE today
     realize(forecast, weather::Unit::Celsius, calendar);
     CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
-    // The divider lines own exactly their row and column, in the muted ink,
-    // with nothing else drawn there.
+    // S9: NO separator anywhere — row 32 and column 32 are empty in every
+    // ink, and so are the spare column 31 and row 31 strips.
     for (int i = 0; i < 64; ++i) {
-      CHECK(canvas[32 * 64 + i] == idle_clock::MUTED);
-      CHECK(canvas[i * 64 + 32] == idle_clock::MUTED);
-    }
-    // The one spare column/row of each cell strip stays empty, except
-    // where the divider lines legitimately cross them: row 32 paints
-    // (31, 32) and column 32 paints (32, 31), both in the muted ink.
-    for (int i = 0; i < 64; ++i) {
-      CHECK(i == 32 ? canvas[i * 64 + 31] == idle_clock::MUTED
-                    : canvas[i * 64 + 31] == SENTINEL);
-      CHECK(i == 32 ? canvas[31 * 64 + i] == idle_clock::MUTED
-                    : canvas[31 * 64 + i] == SENTINEL);
+      CHECK(canvas[32 * 64 + i] == SENTINEL);
+      CHECK(canvas[i * 64 + 32] == SENTINEL);
+      CHECK(canvas[i * 64 + 31] == SENTINEL);
+      CHECK(canvas[31 * 64 + i] == SENTINEL);
     }
     if (test == "cells") {
       // Mutating ONE cell's inputs may move pixels only inside that cell's
-      // region — no bleed into the neighbour or the dividers.
+      // region — no bleed into the neighbour across the empty strip.
       const Canvas base = canvas;
       for (int i = 0; i < 4; ++i) {
         weather::Forecast mutated = forecast;
@@ -295,12 +327,13 @@ int main(int argc, char **argv) {
       }
     }
   } else if (test == "truncation") {
-    // Cell 0: -100.0 at scale 2 is five glyphs (38 px) and must lose whole
-    // trailing characters down to "-100" (30 px), never a mid-glyph cut.
-    // Cell 1: +1000.0 four glyphs (30 px) fits exactly. Cell 2: the minimum
-    // -100.0 also sits at scale 2 now (30 px) and never truncates.
-    const int16_t tmax[4] = {-1000, 10000, 123, 98};
-    const int16_t tmin[4] = {31, -25, -1000, 12};
+    // S9 drops the sign, so an in-range extreme never truncates: ±1000.0
+    // renders as four digit glyphs (30 px at scale 2) and fits exactly.
+    // Cell 0 maximum -1000.0 (intense blue), cell 1 maximum +1000.0
+    // (white), cell 2 minimum -1000.0 (intense blue) — all four glyphs
+    // kept, nothing beyond the cell.
+    const int16_t tmax[4] = {-10000, 10000, 123, 98};
+    const int16_t tmin[4] = {31, -25, -10000, 12};
     const uint8_t prob[4] = {10, 45, 80, 5};
     const uint8_t code[4] = {0, 3, 45, 63};
     const weather::Forecast forecast =
@@ -308,21 +341,28 @@ int main(int argc, char **argv) {
     const std::tm calendar = makeCalendar(0); // DOM today
     realize(forecast, weather::Unit::Celsius, calendar);
     CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
-    // Explicit proof that the truncated cell stays inside its region: the
-    // maximum band of cell 0 paints nothing beyond column 29, the spare
-    // column 31 carries nothing, and column 32 only ever shows the divider.
+    // Explicit proof that the extreme cells stay inside their region: the
+    // four-glyph maximum/minimum bands end at column x0+29, the spare
+    // column 31 stays empty and — with the dividers gone — even column 32
+    // and row 32 carry nothing at all.
     for (int y = 7; y <= 16; ++y) {
-      CHECK(canvas[y * 64 + 30] == SENTINEL); // "-100" ends at column 29
+      CHECK(canvas[y * 64 + 30] == SENTINEL); // "1000" ends at column 29
       CHECK(canvas[y * 64 + 31] == SENTINEL); // spare column empty
-      CHECK(canvas[y * 64 + 32] == idle_clock::MUTED); // only the divider
+      CHECK(canvas[y * 64 + 32] == SENTINEL); // no separator line
     }
-    for (int y = 0; y < 64; ++y)
-      CHECK(y == 32 ? canvas[y * 64 + 31] == idle_clock::MUTED
-                    : canvas[y * 64 + 31] == SENTINEL);
+    for (int i = 0; i < 64; ++i) {
+      CHECK(canvas[i * 64 + 32] == SENTINEL);
+      CHECK(canvas[31 * 64 + i] == SENTINEL);
+      CHECK(canvas[i * 64 + 31] == SENTINEL);
+    }
+    CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_NEG));
+    CHECK(bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::WHITE));
+    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_NEG));
   } else if (test == "values") {
     // Two-digit, three-digit, negative and zero temperatures; probabilities
     // 0 (as 00%), single digit (07%) and three digits (100%). A negative
-    // minimum ('-40') and a negative-sign maximum ('-5') are both drawn.
+    // minimum (-40) and a negative maximum (-5) are both drawn WITHOUT the
+    // minus glyph, in intense blue (S9).
     const int16_t tmax[4] = {253, 1000, -52, 0};
     const int16_t tmin[4] = {0, -1, -400, 400};
     const uint8_t prob[4] = {0, 7, 100, 55};
@@ -332,33 +372,39 @@ int main(int argc, char **argv) {
     const std::tm calendar = makeCalendar(2); // MAR today
     realize(forecast, weather::Unit::Celsius, calendar);
     CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
-    // Positive band probes: every field of every cell is present inside
-    // its own band in its own ink (the exact-image match above pins the
-    // exact glyph pixels). S7: label and probability share the label row;
-    // both temperatures use the ten scale-2 rows.
+    // Band probes: positive maxima white (cells 0, 1, 3), positive minima
+    // muted instead of blue (S9), negative figures intense blue (cell 2
+    // maximum "5" and minimum "40").
+    for (int i : {0, 1, 3}) {
+      CHECK(bandHas(canvas, ORIGIN[i], 7, 10, idle_clock::WHITE));
+      CHECK(bandHas(canvas, ORIGIN[i], 19, 10, idle_clock::MUTED));
+      CHECK(!bandHas(canvas, ORIGIN[i], 7, 10, PINNED_NEG));
+      CHECK(!bandHas(canvas, ORIGIN[i], 19, 10, PINNED_NEG));
+    }
+    CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_NEG));
+    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_NEG));
+    CHECK(!bandHas(canvas, ORIGIN[2], 7, 10, idle_clock::WHITE));
+    // The label row keeps its muted day labels and amber probability at
+    // the cell's right edge on row 0 only.
     for (int i = 0; i < 4; ++i) {
       CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::MUTED));
-      CHECK(bandHas(canvas, ORIGIN[i], 7, 10, idle_clock::WHITE));
-      CHECK(bandHas(canvas, ORIGIN[i], 19, 10, idle_clock::BLUE));
       CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::AMBER));
-      // S7: the probability is parked at the cell's own right edge — the
-      // rightmost amber pixel is exactly the last column of the cell, and
-      // amber lives on the label row only: below the icon slot (rows
-      // y0+22..y0+30, the old probability band) no amber can remain.
       CHECK(rightmostOf(canvas, ORIGIN[i], idle_clock::AMBER) ==
             ORIGIN[i].x0 + 30);
       for (int y = ORIGIN[i].y0 + 22; y < ORIGIN[i].y0 + REGION_SPAN; ++y)
         for (int x = ORIGIN[i].x0; x < ORIGIN[i].x0 + REGION_SPAN; ++x)
           CHECK(canvas[y * 64 + x] != idle_clock::AMBER);
     }
-    // The negative maximum of cell 2 carries its sign: the '-' glyph is
-    // always the FIRST character of a negative value, so its dash — at
-    // scale 2 the scaled rows y0+7+4..y0+7+5 — starts at the cell origin
-    // itself (col 0 is on in {0,0,7,0,0}).
-    CHECK(canvas[(ORIGIN[2].y0 + 7 + 4) * 64 + ORIGIN[2].x0] ==
-          idle_clock::WHITE);
+    // S9: the negative maximum of cell 2 starts with its digit, not with
+    // a dash — glyph "5" lights its top-left pixel at the cell origin in
+    // the NEGATIVE ink, whereas a drawn minus would place the dash lower
+    // (row y0+7+8..y0+7+9 at scale 2, the scaled glyph row 2) and leave
+    // the top rows blank.
+    CHECK(canvas[(ORIGIN[2].y0 + 7 + 0) * 64 + ORIGIN[2].x0] == PINNED_NEG);
+    for (int dy = 0; dy < 4; ++dy)
+      CHECK(canvas[(ORIGIN[2].y0 + 7 + dy) * 64 + ORIGIN[2].x0] != SENTINEL);
   } else if (test == "icons") {
-    // S7/S8 layout proofs, one image per rule.
+    // S7/S8/S9 layout proofs, one image per rule.
     const uint8_t prob[4] = {10, 45, 80, 5};
     const std::tm calendar = makeCalendar(4); // JUE today
     auto render = [&](const int16_t *tmax, const int16_t *tmin,
@@ -373,12 +419,18 @@ int main(int argc, char **argv) {
       return false;
     };
     { // (a) Row 0: label left, probability right-aligned at x0+30; both
-      // temperatures ten rows tall; icons for group codes.
+      // temperatures ten rows tall; icons for group codes, 4 px further
+      // left than before.
       const int16_t tmax[4] = {250, 1000, 253, 98};
       const int16_t tmin[4] = {120, -25, 1000, 12};
       const uint8_t code[4] = {0, 63, 3, 95};
+      const weather::Forecast rendered =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, code);
       CHECK(!render(tmax, tmin, code));
       for (int i = 0; i < 4; ++i) {
+        bool minNegative = false;
+        degreesDigits(rendered, i, false, weather::Unit::Celsius, minNegative);
+        const uint16_t minInk = minNegative ? PINNED_NEG : idle_clock::MUTED;
         CHECK(rightmostOf(canvas, ORIGIN[i], idle_clock::AMBER) ==
               ORIGIN[i].x0 + 30);
         CHECK(bandHas(canvas, ORIGIN[i], 0, 1, idle_clock::AMBER));
@@ -387,45 +439,50 @@ int main(int argc, char **argv) {
         // and the minimum band rows y0+19..y0+28 are all ten rows tall.
         for (int dy = 0; dy < 10; ++dy) {
           CHECK(bandHas(canvas, ORIGIN[i], 7 + dy, 1, idle_clock::WHITE));
-          CHECK(bandHas(canvas, ORIGIN[i], 19 + dy, 1, idle_clock::BLUE));
+          CHECK(bandHas(canvas, ORIGIN[i], 19 + dy, 1, minInk));
         }
       }
       // The icon slot: cells 0 (clear) and 3 (storm) carry ink; cells 1
-      // (three-digit maximum) and 2 (three-digit minimum) do not.
+      // (three-digit maximum) and 2 (three-digit minimum) do not. For the
+      // dropped cells the probe starts past column 21: their kept three-
+      // glyph figures reach x0+21 and overlap the slot's rows.
       CHECK(slotHasInk(canvas, 0));
       CHECK(slotHasInk(canvas, 3));
-      CHECK(!slotHasInk(canvas, 1));
-      CHECK(!slotHasInk(canvas, 2));
-      // The three-digit drop keeps EVERY digit: "100" (white) spans
-      // columns x0..x0+21 with the slot beside it empty… and the minimum
-      // of cell 2 ("100" in blue) is what drops cell 2's icon — cell 2's
-      // own maximum "25" would have fit alone.
-      int lastWhite = -1, lastBlue = -1;
-      for (int y = ORIGIN[1].y0 + 7; y <= ORIGIN[1].y0 + 16; ++y)
-        for (int x = ORIGIN[1].x0; x < ORIGIN[1].x0 + REGION_SPAN; ++x)
-          if (canvas[y * 64 + x] == idle_clock::WHITE) lastWhite = x;
-      CHECK(lastWhite == ORIGIN[1].x0 + 21);
-      for (int y = ORIGIN[2].y0 + 19; y <= ORIGIN[2].y0 + 28; ++y)
-        for (int x = ORIGIN[2].x0; x < ORIGIN[2].x0 + REGION_SPAN; ++x)
-          if (canvas[y * 64 + x] == idle_clock::BLUE) lastBlue = x;
-      CHECK(lastBlue == ORIGIN[2].x0 + 21);
-      // The icon never overlaps a number or a divider: the slot of an
-      // iconized cell carries the very ink the pinned bitmap uses, and
-      // nothing paints past the slot's right edge (the spare column 31
-      // stays empty against the divider at 32).
-      for (int i : {0, 3}) {
-        const uint16_t ink =
-            PINNED_ICON_INK[i == 0 ? int(weather::Icon::Clear)
-                                   : int(weather::Icon::Storm)];
-        bool present = false;
-        for (int y = ORIGIN[i].y0 + 14; y < ORIGIN[i].y0 + 22; ++y)
-          for (int x = ORIGIN[i].x0 + 23; x < ORIGIN[i].x0 + 31; ++x)
-            if (canvas[y * 64 + x] == ink) present = true;
-        CHECK(present);
-        if (i == 0) // the right-hand cells end at the canvas edge (col 63)
-          CHECK(canvas[(ORIGIN[i].y0 + 14) * 64 + ORIGIN[i].x0 + 31] ==
-                SENTINEL);
-      }
+      CHECK(!slotHasInk(canvas, 1, 22, 26));
+      CHECK(!slotHasInk(canvas, 2, 22, 26));
+      // S9: the icon lives four columns further left — its leftmost ink
+      // column is exactly x0+19, and the four OLD slot columns
+      // x0+27..x0+30 are now untouched sentinel.
+      int leftmostIcon = -1;
+      for (int x = ORIGIN[0].x0 + 19; x <= ORIGIN[0].x0 + 26; ++x)
+        for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
+          if (canvas[y * 64 + x] == idle_clock::AMBER &&
+              (leftmostIcon < 0 || x < leftmostIcon))
+            leftmostIcon = x;
+      CHECK(leftmostIcon == ORIGIN[0].x0 + 19); // 23 - 4 = 19
+      for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
+        for (int x = ORIGIN[0].x0 + 27; x <= ORIGIN[0].x0 + 30; ++x)
+          CHECK(canvas[y * 64 + x] == SENTINEL); // old right columns free
+      // The icon never touches the figures: cell 0's maximum "25" ends at
+      // column x0+13 at scale 2, the icon starts at x0+19, so columns
+      // x0+14..x0+18 stay empty in the maximum band rows. The width probe
+      // scans only rows y0+7..y0+13 — above the icon slot rows, so the
+      // icon's own ink cannot masquerade as a digit.
+      CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 7) ==
+            ORIGIN[0].x0 + 13);
+      for (int y = ORIGIN[0].y0 + 7; y <= ORIGIN[0].y0 + 16; ++y)
+        for (int x = ORIGIN[0].x0 + 14; x <= ORIGIN[0].x0 + 18; ++x)
+          CHECK(canvas[y * 64 + x] == SENTINEL);
+      // The three-drop rule keeps EVERY digit: "100" (white) spans
+      // columns x0..x0+21 (scanned above the slot rows) with the slot
+      // beside it empty... and the minimum of cell 2 ("100") is what drops
+      // cell 2's icon — cell 2's own maximum "25" would have fit alone.
+      CHECK(rightmostInkInBand(canvas, ORIGIN[1], 7, 7) ==
+            ORIGIN[1].x0 + 21);
+      CHECK(rightmostInkInBand(canvas, ORIGIN[2], 19, 4) ==
+            ORIGIN[2].x0 + 21);
+      // Nothing paints past the slot's right edge into the spare column.
+      CHECK(canvas[(ORIGIN[0].y0 + 14) * 64 + ORIGIN[0].x0 + 27] == SENTINEL);
     }
     { // (b) Unknown codes draw no icon even when both numbers fit.
       const int16_t tmax[4] = {250, 250, 253, 98};
@@ -437,21 +494,35 @@ int main(int argc, char **argv) {
       CHECK(slotHasInk(canvas, 2));  // fog (45)
       CHECK(slotHasInk(canvas, 3));  // rime fog (48)
     }
-    { // (c) Signs cost a glyph cell: "-5" keeps the icon, "-12" drops it
-      // like a three-digit magnitude, keeping every digit.
-      const int16_t tmax[4] = {250, 250, -120, -52};
+    { // (c) S9: the sign lives in the colour, not in a glyph — "-5" and
+      // "5" render with the SAME digit width, the negative maximum is
+      // intense blue and the positive one white; "-100" drops the icon
+      // exactly like "100", keeping every digit.
+      const int16_t tmax[4] = {250, -250, -1000, -52};
       const int16_t tmin[4] = {120, 120, 12, 12};
       const uint8_t code[4] = {0, 0, 0, 0};
       CHECK(!render(tmax, tmin, code));
-      CHECK(slotHasInk(canvas, 0));
-      CHECK(slotHasInk(canvas, 1));
-      CHECK(!slotHasInk(canvas, 2)); // "-12" is three characters
-      int lastWhite = -1;
-      for (int y = ORIGIN[2].y0 + 7; y <= ORIGIN[2].y0 + 16; ++y)
-        for (int x = ORIGIN[2].x0; x < ORIGIN[2].x0 + REGION_SPAN; ++x)
-          if (canvas[y * 64 + x] == idle_clock::WHITE) lastWhite = x;
-      CHECK(lastWhite == ORIGIN[2].x0 + 21); // every digit of "-12" kept
-      CHECK(slotHasInk(canvas, 3));          // "-5" fits beside the icon
+      // Same digits, same width: cells 0 and 1 both draw "25" and their
+      // maximum bands end at the same OFFSET from their own cell origin
+      // (scanned above the slot rows so the icons' ink cannot interfere).
+      CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 7) - ORIGIN[0].x0 ==
+            rightmostInkInBand(canvas, ORIGIN[1], 7, 7) - ORIGIN[1].x0);
+      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, idle_clock::WHITE));
+      CHECK(!bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::WHITE));
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_NEG));
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::MUTED) == false);
+      // No minus anywhere: nothing in either maximum band rows sits left
+      // of the first digit — glyph "2" starts top-left at the origin.
+      for (int i : {0, 1})
+        CHECK(canvas[(ORIGIN[i].y0 + 7) * 64 + ORIGIN[i].x0] != SENTINEL);
+      // "-100" (cell 2): the icon drops, all three digits kept in the
+      // intense blue; the slot probe starts past the kept figure's last
+      // column (x0+21). "-5" (cell 3): three glyphs become two, icon kept.
+      CHECK(!slotHasInk(canvas, 2, 22, 26));
+      CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
+            ORIGIN[2].x0 + 21);
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_NEG));
+      CHECK(slotHasInk(canvas, 3));
     }
   } else if (test == "units") {
     // A Celsius-stored forecast shown in Fahrenheit converts through the
@@ -516,7 +587,10 @@ int main(int argc, char **argv) {
     // Every painted pixel must pass through the shared brightness helper:
     // the same render through a panel::color() wrapper equals the raw
     // canvas mapped through panel::color() per pixel, sentinel untouched.
-    const int16_t tmax[4] = {123, 111, 102, 98};
+    // Cell 0 carries a negative maximum (-52.0) in the intense blue and a
+    // positive minimum in the muted ink; cell 1 a positive maximum in
+    // white; the clear icon of cell 0 sits in its S9 slot.
+    const int16_t tmax[4] = {-520, 111, 102, 98};
     const int16_t tmin[4] = {31, -25, 41, 12};
     const uint8_t prob[4] = {10, 45, 80, 5};
     const uint8_t code[4] = {0, 1, 3, 63};
@@ -534,13 +608,11 @@ int main(int argc, char **argv) {
                          });
     for (int p = 0; p < 64 * 64; ++p)
       CHECK(scaled[p] == (raw[p] == SENTINEL ? SENTINEL : panel::color(raw[p])));
-    CHECK(scaled[32 * 64 + 5] == panel::color(idle_clock::MUTED));
-    CHECK(bandHas(scaled, ORIGIN[0], 7, 10,
-                  panel::color(idle_clock::WHITE)));
-    // The scale-2 minimum band and the S8 icon slot are graded through
-    // panel::color as well (cell 0 is clear at AMBER ink here).
+    CHECK(bandHas(scaled, ORIGIN[0], 7, 10, panel::color(PINNED_NEG)));
     CHECK(bandHas(scaled, ORIGIN[0], 19, 10,
-                  panel::color(idle_clock::BLUE)));
+                  panel::color(idle_clock::MUTED)));
+    CHECK(bandHas(scaled, ORIGIN[1], 7, 10,
+                  panel::color(idle_clock::WHITE)));
     CHECK(bandHas(scaled, ORIGIN[0], 14, 8,
                   panel::color(idle_clock::AMBER)));
     CHECK(!(scaled == raw)); // 30 % default actually changed the values

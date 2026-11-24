@@ -7,12 +7,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class WeatherScreenTests(unittest.TestCase):
-    """T2 (S1, S3, S7, S8): the weather screen renderer, host-tested on a
-    64x64 canvas — the divider geometry, the four 31x31 cells (per S7:
-    label and probability sharing the top row, the probability at the
-    cell's right edge, both temperatures at scale 2), the S8 icon slot
-    rules, per-cell isolation, the truncation rule, unit conversion and
-    the shared brightness helper."""
+    """T2 (S1, S3, S7, S8, S9): the weather screen renderer, host-tested on
+    a 64x64 canvas — the four 31x31 cells (per S7: label and probability
+    sharing the top row, the probability at the cell's right edge, both
+    temperatures at scale 2), the S8 icon slot rules, the S9 absence of
+    separator lines, the S9 sign-by-colour rule (negative figures in
+    intense blue without a minus glyph, positive minimum muted), per-cell
+    isolation, the truncation rule, unit conversion and the shared
+    brightness helper."""
 
     def run_case(self, case):
         # Compile per rule so a missing implementation is visible as RED for
@@ -30,7 +32,7 @@ class WeatherScreenTests(unittest.TestCase):
             self.assertEqual((result.returncode, result.stdout, result.stderr),
                              (0, "OK\n", ""))
 
-    def test_divider_lines_own_their_row_and_column(self): self.run_case("dividers")
+    def test_no_separator_lines_remain_anywhere(self): self.run_case("dividers")
     def test_cells_are_isolated_and_match_the_documented_layout(self): self.run_case("cells")
     def test_oversized_values_truncate_without_crossing_a_divider(self): self.run_case("truncation")
     def test_digit_counts_signs_and_probability_formatting(self): self.run_case("values")
