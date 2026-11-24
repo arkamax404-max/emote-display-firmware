@@ -10,7 +10,8 @@ from test_serial_protocol import msvc_vcvars
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# The S6 decision pins: 50 ms debounce, 5000 ms continuous hold.
+# The S6 decision pins: 50 ms debounce, 5000 ms continuous hold. The erase
+# scope pins follow S11: exactly ssid and password, never updir.
 DEBOUNCE_MS = 50
 HOLD_MS = 5000
 
@@ -201,25 +202,31 @@ class HoldResetTests(unittest.TestCase):
         return self.run_script(["erase %d %d %d %d %d" % (
             present, fail, failwrite, updir, corrupt), "dump"], mode="erase")
 
-    def test_erase_removes_exactly_ssid_password_updir(self):
-        # brightness (bit 3) is out of scope: it must survive untouched.
+    def test_erase_removes_exactly_ssid_and_password(self):
+        # S11: the scope is exactly ssid (bit 0) and password (bit 1).
+        # updir (bit 2) and brightness (bit 3) are OUT of scope: both must
+        # survive untouched.
         line = self.erase_keys(15)[0]
-        self.assertEqual(line, "erase ok left=8")
+        self.assertEqual(line, "erase ok left=12")
 
     def test_erase_with_nothing_stored_is_verified(self):
         self.assertEqual(self.erase_keys(0), ["erase ok left=0"])
 
     def test_erase_partial_scope_is_verified(self):
-        # Only some of the three keys exist: the rest are simply absent.
+        # Only some of the scope keys exist: the rest are simply absent.
         self.assertEqual(self.erase_keys(3), ["erase ok left=0"])  # ssid+password
-        self.assertEqual(self.erase_keys(4), ["erase ok left=0"])  # only updir
+        # ONLY updir stored (no scope key at all): a verified no-op erase
+        # that must leave the byte exactly as it was.
+        self.assertEqual(self.erase_keys(4), ["erase ok left=4"])
+        self.assertEqual(self.erase_keys(12), ["erase ok left=12"])  # out-of-scope keys only
 
     def test_erase_reports_an_unverified_removal(self):
         # A simulated write failure leaves ssid in place: the outcome must be
         # "unverified" (the firmware then skips the restart). The loop stops
         # at the first unverifiable removal and restores the keys removed
-        # before it, so the named keys survive as well.
-        self.assertEqual(self.erase_keys(15, fail=1), ["erase unverified left=15"])  # ssid kept; brightness was never in scope
+        # before it, so the named keys survive as well — and the out-of-scope
+        # updir byte is untouched either way.
+        self.assertEqual(self.erase_keys(15, fail=1), ["erase unverified left=15"])  # ssid kept; brightness and updir were never in scope
         # Password fails: ssid was already removed and must be RESTORED
         # byte-identically before reporting failure, so every value lives on.
         self.assertEqual(self.erase_keys(15, fail=2), ["erase unverified left=15"])
@@ -237,27 +244,24 @@ class HoldResetTests(unittest.TestCase):
                 _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
                 UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
 
-    def test_failed_updir_removal_restores_the_same_byte(self):
-        # Defect under test: `updir` is a Preferences unsigned byte, so a
-        # failed removal must round-trip the stored byte through the typed
-        # accessors — the value afterwards is the same byte it was before,
-        # not an empty string (what getString/putString would restore).
-        out = self.erase_and_dump(15, fail=4)  # updir (bit2) removal fails
-        self.assertEqual(out[0], "erase unverified left=15")
+    def test_updir_and_brightness_survive_the_erase_byte_identical(self):
+        # S11: the upright reference is deliberately OUT of the reset scope —
+        # a hold that only means "forget the Wi-Fi" must not unseat the
+        # panel's rotation (the /config recalibration route clears the
+        # reference deliberately). Both stored byte edges survive: the
+        # scenario default 3 and the byte 0 (present, never absent).
+        out = self.erase_and_dump(15)  # updir stored as 3
+        self.assertEqual(out[0], "erase ok left=12")
         self.assertEqual(
             out[1],
-            "dump ssid=%s password=%s updir=%d brightness=%s" % (
-                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
-                UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
-
-    def test_updir_absent_is_distinguishable_in_the_typed_store(self):
-        # The typed contract (readUChar false = absent) keeps an absent key
-        # distinct from any stored byte: a verified erase leaves updir
-        # reported absent, and a present byte 3 reports 3, never "-".
-        out = self.run_script(["erase 15 0", "dump"], mode="erase")
-        self.assertEqual(out[1],
-                         "dump ssid=- password=- updir=- brightness=%s"
-                         % _hexspec(BRIGHTNESS_VALUE))
+            "dump ssid=- password=- updir=3 brightness=%s"
+            % _hexspec(BRIGHTNESS_VALUE))
+        out = self.erase_and_dump(15, updir=0)  # updir stored as byte 0
+        self.assertEqual(out[0], "erase ok left=12")
+        self.assertEqual(
+            out[1],
+            "dump ssid=- password=- updir=0 brightness=%s"
+            % _hexspec(BRIGHTNESS_VALUE))
 
     def test_unverifiable_restore_write_reports_failure(self):
         # A restore write that cannot be persisted must not be ignored: the
@@ -273,69 +277,31 @@ class HoldResetTests(unittest.TestCase):
                 _hexspec(PASSWORD_VALUE), UPDIR_VALUE,
                 _hexspec(BRIGHTNESS_VALUE)))
 
-    def test_failed_updir_restore_write_reports_failure(self):
-        # Same contract for the typed byte: the updir removal failed and its
-        # restore write fails too — "unverified", and ssid/password stay
-        # restored byte-identically.
-        out = self.erase_and_dump(15, fail=4, failwrite=4)
-        self.assertEqual(out[0], "erase unverified left=15")
-        self.assertEqual(
-            out[1],
-            "dump ssid=%s password=%s updir=%d brightness=%s" % (
-                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
-                UPDIR_VALUE, _hexspec(BRIGHTNESS_VALUE)))
-
-    def test_stored_updir_zero_survives_a_failed_removal_as_byte_zero(self):
-        # Gap 1: `updir` stored as the byte 0. Its removal fails, so the
-        # rollback writes the byte 0 back (write plus read-back) — a stored
-        # byte 0, not an empty string and not the absent state — and all
-        # three original values stay intact. In the same run a verified
-        # erase of the same stored zero reports updir absent, so the absent
-        # state stays distinguishable from a stored zero.
-        out = self.run_script(
-            ["erase 15 4 0 0",   # updir stored as 0, its removal fails
-             "dump",
-             "erase 15 0 0 0",   # same run: stored 0, removal succeeds
-             "dump"],
-            mode="erase")
-        self.assertEqual(out[0], "erase unverified left=15")
-        self.assertEqual(
-            out[1],
-            "dump ssid=%s password=%s updir=0 brightness=%s" % (
-                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
-                _hexspec(BRIGHTNESS_VALUE)))
-        self.assertEqual(out[2], "erase ok left=8")
-        self.assertEqual(
-            out[3],
-            "dump ssid=- password=- updir=- brightness=%s"
-            % _hexspec(BRIGHTNESS_VALUE))
-
     def test_restore_write_lies_but_read_back_catches_it(self):
-        # Gap 2: the restore write reports success while the subsequent
-        # read-back returns a different byte (the corrupt-write mode stores
-        # snapshot+1 = 4 instead of the snapshot 3). The erase must stay
-        # unverified — the only way the routine can know the write lied is
-        # the read-back, so an unverified verdict here is itself the proof
-        # the read-back actually happened — and the caller must not restart
-        # (pinned for every unverified erase by
-        # test_no_restart_when_erase_unverified). The dump shows the wrong
-        # byte did land in the store: the write was not a silent no-op.
-        out = self.erase_and_dump(15, fail=4, corrupt=4)  # updir restore lies
+        # The restore write reports success while the subsequent read-back
+        # returns something else (the corrupt-write mode stores value+"*"),
+        # so the erase must stay unverified — the only way the routine can
+        # know the write lied is the read-back, so an unverified verdict here
+        # is itself the proof the read-back actually happened — and the
+        # caller must not restart (pinned for every unverified erase by
+        # test_no_restart_when_erase_unverified). The dump shows the lying
+        # value did land in the store: the write was not a silent no-op.
+        out = self.erase_and_dump(15, fail=2, corrupt=1)  # ssid restore lies
         self.assertEqual(out[0], "erase unverified left=15")
         self.assertEqual(
             out[1],
-            "dump ssid=%s password=%s updir=4 brightness=%s" % (
-                _hexspec(SSID_VALUE), _hexspec(PASSWORD_VALUE),
+            "dump ssid=%s password=%s updir=3 brightness=%s" % (
+                _hexspec(SSID_VALUE + "*"), _hexspec(PASSWORD_VALUE),
                 _hexspec(BRIGHTNESS_VALUE)))
 
-    def test_success_path_removes_exactly_the_three_keys(self):
-        # The success path removes exactly ssid/password/updir with verified
-        # read-back; brightness and its value are untouched.
+    def test_success_path_removes_exactly_the_scope_keys(self):
+        # The success path removes exactly the two scope keys with verified
+        # read-back; updir and brightness byte-identically untouched.
         out = self.erase_and_dump(15, fail=0)
-        self.assertEqual(out[0], "erase ok left=8")
+        self.assertEqual(out[0], "erase ok left=12")
         self.assertEqual(
             out[1],
-            "dump ssid=- password=- updir=- brightness=%s"
+            "dump ssid=- password=- updir=3 brightness=%s"
             % _hexspec(BRIGHTNESS_VALUE))
 
 
@@ -372,22 +338,33 @@ class MainWiringStructuralTests(unittest.TestCase):
         self.assertIn("if (clearProvisionedCredentials()) ESP.restart();", poll)
         self.assertEqual(poll.count("ESP.restart()"), 1)
 
-    def test_adapter_round_trips_updir_as_uchar(self):
-        # Defect 1 (this session): the adapter snapshotted/restored `updir`
-        # through getString/putString, so a failed-erase restore wrote back an
-        # empty string instead of the stored byte. `updir` is an unsigned
-        # byte everywhere else (setup() reads it with getUChar and
-        # pollOrientation writes it with putUChar); ssid and password stay
-        # strings.
+    def test_adapter_touches_only_the_scope_keys(self):
+        # S11: the reset scope is exactly ssid and password, both strings.
+        # The adapter no longer serves any byte key (the typed accessors are
+        # gone from the store interface): the orientation byte is only ever
+        # cleared by the /config recalibration route, never by the DOWN hold.
         adapter = self.source.split("class ProvisionedPrefs", 1)[1]
         adapter = adapter[:adapter.index("\n};")]
-        self.assertIn('preferences_.getUChar("updir", 255)', adapter)
-        self.assertIn('preferences_.putUChar("updir", value)', adapter)
-        # The restore write of the byte is checked, not ignored.
-        self.assertIn('return preferences_.putUChar("updir", value) != 0;', adapter)
+        self.assertNotIn("updir", adapter)
+        self.assertNotIn("getUChar", adapter)
+        self.assertNotIn("putUChar", adapter)
         # ssid/password remain string-typed round-trips.
         self.assertIn("preferences_.getString(", adapter)
         self.assertIn("preferences_.putString(", adapter)
+
+    def test_reset_header_scope_names_only_ssid_and_password(self):
+        # The scope is defined by the host-tested header: exact case, exactly
+        # the two string keys, and no byte accessor at all (which is what
+        # makes touching updir impossible by construction). updir stays
+        # unquoted in the header's prose as the documented out-of-scope key.
+        header = (ROOT / "include/wifi_credentials_reset.h").read_text()
+        erase = header.split("inline bool eraseCredentials", 1)[1]
+        self.assertIn('"ssid"', erase)
+        self.assertIn('"password"', erase)
+        self.assertNotIn('"updir"', erase)
+        self.assertNotIn("readUChar", erase)
+        self.assertNotIn("writeUChar", erase)
+        self.assertNotIn("updir", erase)
 
 
 class OrientationFirstPaintStructuralTests(unittest.TestCase):

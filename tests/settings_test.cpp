@@ -37,6 +37,15 @@
 //                     take effect (removeUChar keeps the key).
 //                     [<p>] [<c>] [<o>] = the offered percent, clock code
 //                     and order code (defaults 80, 1 = H12, 0 = RGB).
+//                     present bit3 seeds `updir` = 3, an OUT-of-transaction
+//                     key that must survive the store commands untouched.
+//   orientclear <present> <fail>
+//                     panel_settings::clearOrientationReference (T17) over
+//                     the fake store → "orientclear <ok|fail> updir=<n|->
+//                     b=<n|-> c=<n|-> o=<n|->": the single `updir` key
+//                     removed by verified read-back (present bit3 seeds it
+//                     as byte 3; bit15 = the removal does not take effect)
+//                     and the three panel keys untouched either way.
 //   storew <present> <fail> [<s>] [<w>] [<u>]
 //                     storeWeatherSettings over a fake mixed store, same
 //                     fail-bit scheme for clocksecs/weathersecs/units →
@@ -117,6 +126,7 @@ class FakeSettingsStore : public panel_settings::SettingsStore {
     if (present & 1u) bytes_["brightness"] = panel::BRIGHTNESS_DEFAULT_PERCENT;
     if (present & 2u) bytes_["clockformat"] = 0; // 0 = H24, a valid stored code
     if (present & 4u) bytes_["rgborder"] = 5;    // 5 = BGR, a stored snapshot
+    if (present & 8u) bytes_["updir"] = 3;       // the orientation byte, OUT of every settings transaction
   }
   bool hasUChar(const char *key) override { return bytes_.count(key) != 0; }
   bool readUChar(const char *key, uint8_t &value) override {
@@ -142,6 +152,7 @@ class FakeSettingsStore : public panel_settings::SettingsStore {
   static unsigned keyIndex_(const char *key) {
     return std::strcmp(key, "brightness") == 0 ? 0u
         : std::strcmp(key, "clockformat") == 0 ? 1u
+        : std::strcmp(key, "updir") == 0 ? 3u
                                                : 2u; // rgborder
   }
   std::map<std::string, uint8_t> bytes_;
@@ -328,7 +339,8 @@ int main() {
                 << (route == panel_settings::Route::Get ? "get"
                     : route == panel_settings::Route::Save ? "save"
                     : route == panel_settings::Route::CitySave ? "city"
-                                                              : "other")
+                    : route == panel_settings::Route::OrientSave ? "orient"
+                                                                 : "other")
                 << '\n';
     } else if (cmd == "length") {
       std::string hex;
@@ -372,6 +384,24 @@ int main() {
                 << " b=" << (hasBrightness ? std::to_string(brightness) : "-")
                 << " c=" << (hasClock ? std::to_string(clock) : "-")
                 << " o=" << (hasOrder ? std::to_string(orderBack) : "-") << '\n';
+    } else if (cmd == "orisaved") {
+      std::cout << "orisaved "
+                << escape(panel_settings::orientationClearedPage()) << '\n';
+    } else if (cmd == "orientclear") {
+      unsigned present = 0, fail = 0;
+      args >> present >> fail;
+      FakeSettingsStore store(present, fail);
+      const bool ok = panel_settings::clearOrientationReference(store);
+      uint8_t b = 0, c = 0, o = 0, u = 0;
+      const bool hasUpdir = store.readUChar("updir", u);
+      const bool hasBrightness = store.readUChar("brightness", b);
+      const bool hasClock = store.readUChar("clockformat", c);
+      const bool hasOrder = store.readUChar("rgborder", o);
+      std::cout << "orientclear " << (ok ? "ok" : "fail")
+                << " updir=" << (hasUpdir ? std::to_string(u) : "-")
+                << " b=" << (hasBrightness ? std::to_string(b) : "-")
+                << " c=" << (hasClock ? std::to_string(c) : "-")
+                << " o=" << (hasOrder ? std::to_string(o) : "-") << '\n';
     } else if (cmd == "saved") {
       std::string variant;
       args >> variant;

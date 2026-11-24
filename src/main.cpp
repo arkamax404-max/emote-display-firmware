@@ -91,6 +91,11 @@ static size_t configBodyLength = 0;
 // documented, bounded, and never while a PNG body is being read.
 static bool citySavePending = false;
 static bool configBodyIsCity = false;
+// T17 orientation-recalibration route state: the fieldless POST
+// /config/orientation lingers like the other settings POSTs and reuses the
+// same bounded settings buffer when a client sends a body anyway.
+static bool orientSavePending = false;
+static bool configBodyIsOrientation = false;
 static uint32_t requestStarted = 0;;
 static bool listening = false;
 static String ssid, password;
@@ -165,9 +170,10 @@ static bool storeCredentials(const char *newSsid, const char *newPassword) {
 
 // S7/T10: the channel order persists as a small code (0-5) under its own
 // key `rgborder` in the same `gentle` namespace — deliberately NOT one of
-// the DOWN reset keys (those stay exactly ssid/password/updir). putUChar
-// returns zero for the value 0 (the RGB default), so like the credential
-// store the put result is never trusted: read-back decides.
+// the DOWN reset keys (since S11 those are exactly ssid/password; the
+// orientation byte is only cleared by the /config recalibration route).
+// putUChar returns zero for the value 0 (the RGB default), so like the
+// credential store the put result is never trusted: read-back decides.
 static bool storeRgbOrder(rgb_order::Order order) {
   bool saved = false;
   if (preferences.begin("gentle", false)) {
@@ -189,8 +195,9 @@ static idle_clock::ClockFormat clockFormat = idle_clock::ClockFormat::H24;
 // verification rules live in the host-tested panel_settings::storeSettings
 // transaction, which now spans the THREE keys as one atomic triple; the
 // firmware only adapts an open Preferences namespace onto it. No key is in
-// the DOWN-reset scope (wifi_reset erases exactly ssid/password/updir). An
-// absent or out-of-range stored value falls back to the defaults (30 %, 24 h,
+// the DOWN-reset scope (wifi_reset erases exactly ssid/password since S11;
+// the orientation byte is only cleared by the /config recalibration route).
+// An absent or out-of-range stored value falls back to the defaults (30 %, 24 h,
 // RGB — the order decode happens in setup(), before the panel exists).
 class ProvisionedSettingsStore : public panel_settings::SettingsStore {
  public:
@@ -399,14 +406,15 @@ static void pollWeather() {
 static wifi_reset::HoldReset downHold;
 
 // Preferences adapter for the host-tested erase routine: the `gentle`
-// namespace is already open read-write when eraseCredentials runs. The typed
+// namespace is already open read-write when eraseCredentials runs. The
 // accessors serve the failure-restore path (values snapshotted before
-// mutating and written back byte-identically on an unverified erase) and are
-// restricted to exactly the keys of the reset scope, each with the type it
-// actually has: `ssid`/`password` are strings, `updir` is the unsigned byte
-// it actually is (preferences_.getUChar("updir")/preferences_.putUChar("updir"), matching setup()
-// and pollOrientation), so a restore never turns a stored byte into an
-// empty string.
+// mutating and written back byte-identically on an unverified erase) and
+// are restricted to exactly the keys of the reset scope, all strings since
+// S11: `ssid` and `password`. The stored upright orientation byte is
+// deliberately NOT in the scope any more — it is only ever cleared by the
+// /config orientation-recalibration route (T17) — and the store interface
+// has no byte accessor at all, so the DOWN hold cannot touch it by
+// construction.
 class ProvisionedPrefs : public wifi_reset::CredentialStore {
  public:
   explicit ProvisionedPrefs(Preferences &prefs) : preferences_(prefs) {}
@@ -425,19 +433,11 @@ class ProvisionedPrefs : public wifi_reset::CredentialStore {
     preferences_.putString(key, String(value.c_str()));
     return preferences_.isKey(key) && preferences_.getString(key, "") == value.c_str();
   }
-  bool readUChar(const char *key, uint8_t &value) override {
-    if (std::strcmp(key, "updir") != 0) return false;
-    value = preferences_.getUChar("updir", 255); // 255 = absent, as setup() reads it
-    return true;
-  }
-  bool writeUChar(const char *key, uint8_t value) override {
-    if (std::strcmp(key, "updir") != 0) return false;
-    return preferences_.putUChar("updir", value) != 0;
-  }
 
  private:
-  // The reset scope (S6 decision) is fixed: `ssid`, `password` (strings)
-  // and `updir` (unsigned byte, always accessed as the literal "updir").
+  // The reset scope (S6 decision, trimmed by S11) is fixed: `ssid` and
+  // `password`, both strings; nothing else is ever readable or writable
+  // through this adapter.
   static bool isStringResetKey(const char *key) {
     return std::strcmp(key, "ssid") == 0 ||
            std::strcmp(key, "password") == 0;
@@ -445,11 +445,12 @@ class ProvisionedPrefs : public wifi_reset::CredentialStore {
   Preferences &preferences_;
 };
 
-// S6 verified erase: only `ssid`, `password` and `updir` are removed, each
-// verified gone by read-back; brightness, the S7 `rgborder` channel order
-// and every other stored value stay untouched, and nothing is written
-// outside that namespace. False means the removal could not be verified
-// (the caller then does NOT restart, so another hold can retry).
+// S6 verified erase (scope trimmed by S11): only `ssid` and `password` are
+// removed, each verified gone by read-back; the stored upright orientation
+// byte, brightness, the S7 `rgborder` channel order and every other stored
+// value stay untouched, and nothing is written outside that namespace.
+// False means the removal could not be verified (the caller then does NOT
+// restart, so another hold can retry).
 static bool clearProvisionedCredentials() {
   static ProvisionedPrefs store(preferences);
   if (!preferences.begin("gentle", false)) return false;
@@ -1046,6 +1047,7 @@ static void closeRequest() {
   configSurface = false;
   configBody.clear();
   configBodyLength = 0;
+  orientSavePending = false;
 }
 
 // extra carries additional response headers (each ending in CRLF), used by
@@ -1165,6 +1167,12 @@ static bool handleConfigRequestLine() {
     citySavePending = true;
     return false;
   }
+  if (route == panel_settings::Route::OrientSave) {
+    // T17: the orientation-recalibration POST lingers for its complete
+    // header block exactly like the settings save; its form has no fields.
+    orientSavePending = true;
+    return false;
+  }
   configSavePending = true;
   return false;
 }
@@ -1190,6 +1198,7 @@ static void beginConfigSave() {
   configBody.clear();
   configBodyLength = static_cast<size_t>(contentLength);
   configBodyIsCity = false;
+  configBodyIsOrientation = false;
   readingBody = true;
 }
 
@@ -1215,6 +1224,7 @@ static void beginCitySave() {
   configBody.clear();
   configBodyLength = static_cast<size_t>(contentLength);
   configBodyIsCity = true;
+  configBodyIsOrientation = false;
   readingBody = true;
 }
 
@@ -1247,6 +1257,61 @@ static void applyCitySave() {
   }
   weatherCity = resolved; // live record only after the verified store
   replyHtml(200, configPageWithError(""));
+}
+
+// T17: the orientation recalibration -- clear the stored upright reference
+// through the host-tested pure single-key transaction (verified removal,
+// read-back only; an already-absent reference is the goal state) and
+// restart, so setup() re-learns the reference with the panel in its final
+// position. Both the page section and the success page say to keep the
+// panel resting still: the reference needs about 350 ms of stable gravity.
+// A failure to clear leaves EVERYTHING untouched -- no stored key, no live
+// state, no restart -- and answers the settings page with the reason. The
+// live orientation object is deliberately not touched here: the restart
+// re-learns from storage, and a failed clear must not move either.
+static void applyOrientSave() {
+  if (!preferences.begin("gentle", false)) {
+    replyHtml(500, configPageWithError(
+        "Storage failed. The orientation was left unchanged."));
+    return;
+  }
+  static ProvisionedSettingsStore store(preferences);
+  const bool verified = panel_settings::clearOrientationReference(store);
+  preferences.end();
+  if (!verified) {
+    replyHtml(500, configPageWithError(
+        "Storage failed. The orientation was left unchanged."));
+    return;
+  }
+  replyHtml(200, panel_settings::orientationClearedPage());
+  delay(100); // let the small success page drain, exactly like the portal
+  ESP.restart();
+}
+
+// T17: the orientation-recalibration intake -- the same bounded
+// Content-Length discipline as the other settings routes. The form carries
+// no fields, so an empty body is the normal submission and applies at once;
+// a non-empty body is accumulated into the same bounded buffer and simply
+// ignored by the application (there is nothing to review).
+static void beginOrientSave() {
+  const long contentLength = panel_settings::parseContentLength(headers);
+  if (contentLength < 0) {
+    replyHtml(411, configPageWithError("Missing content length."));
+    return;
+  }
+  if (contentLength > static_cast<long>(panel_settings::CONFIG_BODY_MAX)) {
+    replyHtml(413, configPageWithError("Form data too large."));
+    return;
+  }
+  if (contentLength == 0) {
+    applyOrientSave();
+    return;
+  }
+  configBody.clear();
+  configBodyLength = static_cast<size_t>(contentLength);
+  configBodyIsCity = false;
+  configBodyIsOrientation = true;
+  readingBody = true;
 }
 
 // One active request, no frame queue. Parsing is bounded and yields each loop.
@@ -1299,6 +1364,13 @@ static void pollHttp() {
         // now; the receiver parser never sees this request either.
         citySavePending = false;
         beginCitySave();
+        return;
+      }
+      if (orientSavePending) {
+        // A pending POST /config/orientation (T17): the full header block is
+        // here now; the receiver parser never sees this request either.
+        orientSavePending = false;
+        beginOrientSave();
         return;
       }
       const int status = receiver::parseHeaders(headers, request);
@@ -1369,6 +1441,7 @@ static void pollHttp() {
       configBody.push_back(static_cast<char>(value));
       if (configBody.size() == configBodyLength) {
         if (configBodyIsCity) applyCitySave();
+        else if (configBodyIsOrientation) applyOrientSave();
         else applyConfigSave();
         return;
       }

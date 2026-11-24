@@ -191,6 +191,22 @@ class SettingsTests(unittest.TestCase):
                      "GET /config", "GET /Config HTTP/1.1"):
             self.assertEqual(self.run_script(["route " + feed(line)]), ["route other"])
 
+    def test_orientation_route_classified_on_the_exact_post_lines(self):
+        # T17: the recalibration action has its own form and its own exact
+        # POST route; a GET of the path stays Other (like the city route).
+        self.assertEqual(
+            self.run_script(["route " + feed("POST /config/orientation HTTP/1.1")]),
+            ["route orient"])
+        self.assertEqual(
+            self.run_script(["route " + feed("POST /config/orientation HTTP/1.0")]),
+            ["route orient"])
+        for line in ("GET /config/orientation HTTP/1.1",
+                     "POST /config/orientationx HTTP/1.1",
+                     "POST /config/orientation HTTP/9.9",
+                     "post /config/orientation HTTP/1.1",
+                     "POST /config/orientation"):
+            self.assertEqual(self.run_script(["route " + feed(line)]), ["route other"])
+
     def test_content_length_extraction_is_bounded_and_strict(self):
         self.assertEqual(self.run_script(["length " + feed("POST /config HTTP/1.1\r\n"
                                                "Content-Length: 24\r\n\r\n")]),
@@ -256,6 +272,65 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("construction", out)
         self.assertIn('href="/config"', out)
         self.assertNotIn("no restart needed", out)
+
+    # --- T17: the orientation recalibration action ---------------------------
+
+    def test_page_carries_the_orientation_recalibration_in_its_own_form(self):
+        # Its own form and route, with the stillness requirement and its
+        # 350 ms reason said plainly on the page itself.
+        out = self.run_script(["pagew 30 24h RGB C 20 10 " + feed("Sevilla")
+                               + " -"])[0]
+        self.assertIn('action="/config/orientation"', out)
+        self.assertIn('method="POST"', out)
+        self.assertIn('action="/config/orientation"><button type="submit">'
+                      'Recalibrate orientation</button></form>', out)
+        self.assertIn("restart", out)
+        self.assertIn("350 ms", out)
+        self.assertIn("still", out)
+        # The legacy page command renders it too.
+        self.assertIn('action="/config/orientation"',
+                      self.run_script(["page 30 24h RGB -"])[0])
+
+    def test_orientation_cleared_page_says_restart_and_stillness(self):
+        out = self.run_script(["orisaved"])[0]
+        self.assertIn("cleared", out)
+        self.assertIn("re-learns", out)
+        self.assertIn("restart", out)
+        self.assertIn("350 ms", out)
+        self.assertIn("still", out)
+        self.assertIn('href="/config"', out)
+
+    def test_orientclear_removes_only_updir(self):
+        # T17: the verified single-key transaction — exactly `updir`, never
+        # the credentials (never in this surface at all), never the panel
+        # triple. Only updir stored: it is cleared and the rest was absent.
+        self.assertEqual(self.run_script(["orientclear 8 0"]),
+                         ["orientclear ok updir=- b=- c=- o=-"])
+        # Everything stored: only the orientation byte goes; the three panel
+        # keys survive byte-identically (30 %, H24 = 0, BGR = 5).
+        self.assertEqual(self.run_script(["orientclear 15 0"]),
+                         ["orientclear ok updir=- b=30 c=0 o=5"])
+        # Nothing stored: already the goal state, verified success, no write.
+        self.assertEqual(self.run_script(["orientclear 0 0"]),
+                         ["orientclear ok updir=- b=- c=- o=-"])
+
+    def test_orientclear_reports_a_removal_that_does_not_take_effect(self):
+        # The removal is decided by read-back alone: when the store keeps the
+        # key, the outcome is failure (the adapter must not restart) and the
+        # panel keys stay untouched either way.
+        self.assertEqual(self.run_script(["orientclear 8 32768"]),
+                         ["orientclear fail updir=3 b=- c=- o=-"])
+        self.assertEqual(self.run_script(["orientclear 15 32768"]),
+                         ["orientclear fail updir=3 b=30 c=0 o=5"])
+
+    def test_settings_store_commands_never_touch_the_orientation_key(self):
+        # Explicit key-set pin: with updir seeded (present bit 3) the panel
+        # and weather transactions still store exactly their own keys and
+        # leave the orientation byte exactly as it was.
+        self.assertEqual(self.run_store(15, 0, 45, 1, 3), "store ok b=45 c=1 o=3")
+        self.assertEqual(self.run_store(15, 16), "store fail b=30 c=0 o=5")
+        self.assertEqual(self.run_script(["storew 15 0"])[0],
+                         "storew ok s=60 w=30 u=1")
 
     # --- S9/S10 persistence transaction (verified commit + verified rollback) -
 
@@ -497,6 +572,92 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertIn("panel_settings::storeAllSettings(", source)
         self.assertIn("panel_settings::SettingsStore", source)
         self.assertIn("preferences_.getUChar(key, 255)", source)
+
+
+class OrientationResetWiringTests(unittest.TestCase):
+    """T17 (S11) wiring pins over src/main.cpp: the /config orientation
+    recalibration route lingers like the other settings POSTs, the verified
+    clear is the pure panel-settings transaction over the shared store, and
+    the restart happens ONLY after a verified clearing — a failure answers
+    the settings page with the reason and changes nothing. The AP portal
+    page and the ORIENT console command stay exactly as they are."""
+
+    def source(self):
+        return (ROOT / "src/main.cpp").read_text()
+
+    def test_orient_route_lingers_like_the_other_settings_posts(self):
+        # First-line classification only; the bounded length parse happens
+        # at the complete header block, and the receiver parser never sees
+        # the request. The latched state is cleared with the request state.
+        source = self.source()
+        classify = source.split("static bool handleConfigRequestLine() {", 1)[1]
+        classify = classify[:classify.index("\n}")]
+        self.assertIn("panel_settings::Route::OrientSave", classify)
+        self.assertIn("orientSavePending = true;", classify)
+        self.assertNotIn("parseContentLength", classify)
+        self.assertIn("configSurface = true;", classify)
+        close = source.split("static void closeRequest() {", 1)[1]
+        close = close[:close.index("\n}")]
+        self.assertIn("orientSavePending = false;", close)
+        poll = source.split("static void pollHttp() {", 1)[1]
+        poll = poll[:poll.index("\n}")]
+        self.assertLess(poll.index("beginOrientSave();"),
+                        poll.index("receiver::parseHeaders(headers, request)"))
+
+    def test_orient_body_is_bounded_and_fieldless(self):
+        # The form carries no fields: an empty body applies immediately; a
+        # non-empty body still goes through the shared bounded buffer and
+        # the bounded length discipline, never the PNG path.
+        begin = self.source().split("static void beginOrientSave() {", 1)[1]
+        begin = begin[:begin.index("\n}")]
+        self.assertIn("panel_settings::parseContentLength(headers)", begin)
+        self.assertIn("panel_settings::CONFIG_BODY_MAX", begin)
+        self.assertIn("applyOrientSave();", begin)
+        self.assertLess(begin.index("applyOrientSave();"),
+                        begin.index("readingBody = true;"))
+        source = self.source()
+        self.assertIn("configBodyIsOrientation", source)
+        self.assertIn("else if (configBodyIsOrientation) applyOrientSave();",
+                      source)
+
+    def test_restart_only_after_a_verified_clear_and_failure_says_so(self):
+        # The clear is the host-tested pure transaction, the restart sits
+        # inside the verified branch (exactly once), and a failed clear
+        # leaves everything untouched, answers the settings page with the
+        # reason and never restarts.
+        source = self.source()
+        self.assertIn("panel_settings::clearOrientationReference(store)", source)
+        body = source.split("static void applyOrientSave() {", 1)[1]
+        body = body[:body.index("\n}")]
+        self.assertIn("clearOrientationReference(store)", body)
+        self.assertIn("orientationClearedPage()", body)
+        self.assertEqual(body.count("ESP.restart()"), 1)
+        self.assertLess(body.index("clearOrientationReference(store)"),
+                        body.index("ESP.restart()"))
+        unverified = body.split("if (!verified)", 1)[1]
+        unverified = unverified[:unverified.index("return;")]
+        self.assertIn("left unchanged", unverified)
+        self.assertNotIn("ESP.restart()", unverified)
+        # The live orientation object is not touched by this route at all:
+        # the restart re-learns from storage.
+        self.assertNotIn("orientation.resetReference()", body)
+
+    def test_ap_portal_page_and_orient_console_stay_untouched(self):
+        source = self.source()
+        # The portal route set keeps its exact two POST paths.
+        self.assertIn('if (line.path != "/save" && line.path != "/rgborder") {',
+                      source)
+        portal_page = (ROOT / "include/portal_page.h").read_text()
+        self.assertNotIn("/config/orientation", portal_page)
+        # The ORIENT console entry stays wired, first recovery hook position.
+        console = source.split(
+            "static serial::ProvisionConsole provisionConsole({", 1)[1]
+        console = console[:console.index("});")]
+        self.assertIn("[]() { resetOrientationReference(); },", console)
+        # The pure header carries the route constant the firmware classifies.
+        header = (ROOT / "include/panel_settings.h").read_text()
+        self.assertIn('"/config/orientation"', header)
+        self.assertIn("ORIENT_PATH", header)
 
 
 class WeatherSettingsTests(SettingsTests):

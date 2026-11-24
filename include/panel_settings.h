@@ -146,8 +146,12 @@ inline bool storeSettings(SettingsStore &store, uint8_t brightnessPercent,
 // exactly as before, including its unknown-path 404. The city form of T4a
 // posts to its OWN route (POST /config/city): only the POST lines are
 // classified as the city submission, a GET of that path stays Other.
-enum class Route : uint8_t { Other, Get, Save, CitySave };
+enum class Route : uint8_t { Other, Get, Save, CitySave, OrientSave };
 constexpr const char *CITY_PATH = "/config/city";
+// T17: the orientation recalibration has its own form and its own route;
+// only the exact POST lines belong to it, a GET of the path stays Other
+// (like the city route).
+constexpr const char *ORIENT_PATH = "/config/orientation";
 inline Route routeOf(const std::string &firstLine) {
   if (firstLine == "GET /config HTTP/1.1" || firstLine == "GET /config HTTP/1.0")
     return Route::Get;
@@ -156,6 +160,9 @@ inline Route routeOf(const std::string &firstLine) {
   if (firstLine == "POST /config/city HTTP/1.1" ||
       firstLine == "POST /config/city HTTP/1.0")
     return Route::CitySave;
+  if (firstLine == "POST /config/orientation HTTP/1.1" ||
+      firstLine == "POST /config/orientation HTTP/1.0")
+    return Route::OrientSave;
   return Route::Other;
 }
 
@@ -530,6 +537,22 @@ inline bool storeCity(SettingsStore &store, const weather::CityRecord &city) {
   return false;
 }
 
+// T17: the deliberate orientation recalibration of /config clears EXACTLY
+// the single key `updir` — never the panel keys, never the weather keys,
+// never the credentials (the DOWN reset owns those, and since S11 it no
+// longer touches this one either). Verified removal, read-back only: an
+// absent key is already the goal state and reports success with no write
+// at all, while a removal that does not take effect reports failure. The
+// caller applies only on success — it serves the cleared page and
+// restarts; a failure answers the settings page with the reason and
+// changes nothing.
+inline bool clearOrientationReference(SettingsStore &store) {
+  if (!store.hasUChar("updir")) return true;
+  store.removeUChar("updir");
+  uint8_t back = 0;
+  return !store.hasUChar("updir") && !store.readUChar("updir", back);
+}
+
 // GET /config (S8 + T4a): the settings page with the current values
 // preselected. No authentication by decision — the page lives on the local
 // network like every other route of this server. An error re-renders inside
@@ -541,7 +564,11 @@ inline bool storeCity(SettingsStore &store, const weather::CityRecord &city) {
 // under POST /config/city (a separate submission with its own route, so
 // the settings form and the search cannot be mixed); the page states that
 // the weather screen needs a resolved city and that the durations are in
-// seconds; the current city name is shown escaped.
+// seconds; the current city name is shown escaped. T17: an "Orientation"
+// section offers the deliberate recalibration in its own form (POST
+// /config/orientation): clear the saved upright reference and the board
+// restarts to re-learn it, which the page says plainly, together with the
+// stillness requirement and its 350 ms reason.
 inline std::string configPage(
     uint8_t brightnessPercent, idle_clock::ClockFormat clock,
     rgb_order::Order order, weather::Unit unit, uint8_t clockSecs,
@@ -582,6 +609,20 @@ inline std::string configPage(
           "\" placeholder=\"City name\" required></label>"
           "<button type=\"submit\">Search city</button>"
           "</form>";
+  // T17: the orientation recalibration is its own submission to its own
+  // route, with no fields; the page states the stillness requirement and
+  // its reason (the re-learned upright reference needs about 350 ms of
+  // stable gravity while the board restarts).
+  page += "<h2>Orientation</h2>"
+          "<p>If the panel shows the picture rotated (for example after the "
+          "board was moved to a different mounting, or the saved reference "
+          "no longer matches where the panel stands), clear the saved "
+          "upright reference below. The board restarts and re-learns the "
+          "reference with the panel in its final position. Keep the panel "
+          "resting still during the restart: the reference needs about "
+          "350 ms of stable gravity.</p>"
+          "<form method=\"POST\" action=\"" + std::string(ORIENT_PATH) +
+          "\"><button type=\"submit\">Recalibrate orientation</button></form>";
   page += "<h2>Display</h2>"
           "<form method=\"POST\" action=\"/config\">"
           "<label>Brightness<select name=\"brightness\">";
@@ -683,5 +724,22 @@ inline std::string configSavedPage(bool orderRestart = false) {
          "<title>gentle-matrix settings saved</title></head><body>"
          "<h1>gentle-matrix</h1>" +
          std::string(body) + "</body></html>";
+}
+
+// T17: the success page of the orientation recalibration — the reference
+// was cleared and the board is restarting to re-learn it, with the
+// stillness requirement and its reason said plainly. A failed clear
+// answers the settings page with the reason instead and nothing restarts.
+inline std::string orientationClearedPage() {
+  return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+         "<title>gentle-matrix orientation</title></head><body>"
+         "<h1>gentle-matrix</h1>"
+         "<p>Saved orientation reference cleared. The board is restarting "
+         "now &mdash; keep the panel resting still and let it stand in its "
+         "usual position, because it re-learns the reference during the "
+         "restart and needs about 350 ms of stable gravity. You can close "
+         "this page and return to the <a href=\"/config\">settings</a> "
+         "afterwards.</p></body></html>";
 }
 } // namespace panel_settings

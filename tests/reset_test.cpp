@@ -10,10 +10,12 @@
 //
 //   erase     include/wifi_credentials_reset.h eraseCredentials over a fake
 //             store whose keys are a bitmask: bit0 ssid, bit1 password,
-//             bit2 updir, bit3 brightness. The string keys hold fixed
+//             bit2 updir, bit3 brightness. The reset scope (S6 as trimmed by
+//             S11) is EXACTLY ssid/password, both strings with fixed
 //             non-empty values; `updir` is stored as the unsigned byte it
-//             actually is (Preferences getUChar/putUChar, default 3), read
-//             and written through the typed accessors. removeKey leaves
+//             actually is (Preferences getUChar/putUChar, default 3) and —
+//             like `brightness` — must survive every erase untouched.
+//             removeKey leaves
 //             both key and value in place when its fail bit is set
 //             (simulated write failure); a failWrite bit makes the matching
 //             write report failure and store nothing (a restore write that
@@ -71,7 +73,6 @@ class FakeStore : public wifi_reset::CredentialStore {
   }
   bool hasKey(const char *key) override { return (keys_ & maskFor(key)) != 0; }
   bool readString(const char *key, std::string &value) override {
-    if (std::strcmp(key, "updir") == 0) return false; // typed key, not a string
     auto it = values_.find(key);
     if (it == values_.end()) return false;
     value = it->second;
@@ -81,23 +82,6 @@ class FakeStore : public wifi_reset::CredentialStore {
     if (std::strcmp(key, "updir") == 0) return false;
     if ((failWriteMask_ & maskFor(key)) != 0) return false; // store nothing
     values_[key] = (corruptMask_ & maskFor(key)) != 0 ? value + "*" : value;
-    keys_ |= maskFor(key);
-    return true;
-  }
-  bool readUChar(const char *key, uint8_t &value) override {
-    if (std::strcmp(key, "updir") != 0) return false;
-    if ((keys_ & maskFor(key)) == 0) return false; // absent, distinguishable
-    value = updir_;
-    return true;
-  }
-  bool writeUChar(const char *key, uint8_t value) override {
-    if (std::strcmp(key, "updir") != 0) return false;
-    if ((failWriteMask_ & maskFor(key)) != 0) return false; // store nothing
-    // A corrupt write reports success but persists a different byte, so
-    // the subsequent read-back returns something else than what was asked.
-    updir_ = (corruptMask_ & maskFor(key)) != 0
-                 ? static_cast<uint8_t>(value + 1u)
-                 : value;
     keys_ |= maskFor(key);
     return true;
   }

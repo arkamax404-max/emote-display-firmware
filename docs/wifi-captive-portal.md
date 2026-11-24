@@ -172,12 +172,16 @@ that button; the UP button of the Wi-Fi info overlay is GPIO 6):
   the board is connected, retrying at boot or serving the portal. It never
   reads or blocks `Serial` and does not disturb the UP-button overlay or the
   orientation handling.
-- Exactly three keys are removed from the `gentle` namespace, each verified
-  gone by **read-back**: `ssid`, `password` and `updir`. Brightness and
-  every other stored value are untouched, and nothing is written outside
-  that namespace. (Removing `updir` is part of the user-agreed scope: the
-  upright reference is relearned on the first stable pose after the
-  restart, as at the first boot.)
+- Exactly two keys are removed from the `gentle` namespace, each verified
+  gone by **read-back**: `ssid` and `password`. The stored upright
+  orientation reference (`updir`), brightness and every other stored value
+  are untouched, and nothing is written outside that namespace. (Since the
+  S11 decision the upright reference is deliberately NOT reset with the
+  button: a hold that only means "forget the Wi-Fi" no longer unseats the
+  panel's rotation. The deliberate recalibration lives on `/config`, see
+  "Panel settings over the LAN" below; until then the reference survives
+  every app write, restart and credential reset, and is only lost by a
+  full chip erase, a manual NVS wipe or corruption.)
 - **No panel message is shown** (the user chose silence): the restart is
   the only feedback. If a removal cannot be verified, the board does **not**
   restart — the configuration is left exactly as it was and another 5 s
@@ -224,8 +228,9 @@ constructed:
   the credential path, the scan list and the validate-before-persist flow
   are untouched. The page says plainly that **the board restarts to apply
   the choice**, and the success page repeats it.
-- **The DOWN reset keeps its scope**: the 5-second hold still erases
-  exactly `ssid`, `password` and `updir`; the channel order survives it.
+- **The DOWN reset keeps its scope**: the 5-second hold erases
+  exactly `ssid` and `password`; the channel order and the upright
+  reference survive it.
 - Still unverified without this specific panel on the bench: which of the
   six orders that panel actually needs, and how the colours look after the
   restart on real hardware.
@@ -236,10 +241,12 @@ Once the board is connected to its network, the **station HTTP server** (the
 receiver's own server, hosting `/emote` and `/health`) also serves a
 **settings page** at `http://<panel-ip>/config` (also
 `gentle-matrix.local/config` over mDNS), **open on the local network without
-authentication**, like every other route of that server. It offers three settings —
-brightness, clock format and the S7 panel channel order. Brightness and clock
-format need no restart to take effect; a changed channel order does (the
-display driver fixes its pins at construction) (S8):
+authentication**, like every other route of that server. It offers the
+settings below — brightness, clock format, the S7 panel channel order and,
+from the weather feature, the two durations, the unit and the city search —
+plus the orientation recalibration action. Brightness and clock format need
+no restart to take effect; a changed channel order and the orientation
+recalibration do (the reasons are stated on the page) (S8):
 
 - **Brightness (S10)**: percent from **25 to 80 in steps of 5** (the floor is
   25 % because below it some colours stop being visible), default
@@ -272,8 +279,21 @@ display driver fixes its pins at construction) (S8):
   brightness and clock format belong to the board: moving a board to a
   panel with different wiring needs no cable or USB console any more.
 
-Contract of the two routes, decided on the exact first request line
-(`GET /config HTTP/1.1|1.0`, `POST /config HTTP/1.1|1.0`) **before** the
+- **Orientation recalibration (S11)**: a deliberate action in its **own
+  form** at the bottom of the page, submitted to its **own route**
+  (`POST /config/orientation`). It clears the saved upright reference
+  (`updir`, exactly that single key, through a verified removal decided by
+  read-back) and restarts, so the firmware re-learns the reference with
+  the panel in its final position. The page says plainly that the panel
+  must **rest still during the restart**, because the reference needs
+  about **350 ms** of stable gravity. If the clear cannot be verified,
+  **everything is left untouched** — no stored key, no live state — the
+  page says so with the reason (500) and the board does **not** restart.
+  The `ORIENT` USB console command remains the offline route.
+
+Contract of the settings routes, decided on the exact first request line
+(`GET /config HTTP/1.1|1.0`, `POST /config HTTP/1.1|1.0`, plus the exact
+`POST /config/city` and `POST /config/orientation` lines) **before** the
 receiver protocol parser runs, so the receiver's routes and the unknown-path
 404 keep their exact semantics:
 
@@ -300,9 +320,10 @@ receiver protocol parser runs, so the receiver's routes and the unknown-path
   body → 400, oversized body → 413. The `Content-Length` is parsed from the
   complete header block (after `\r\n\r\n`), never from the first request
   line alone.
-- The three new keys are NOT in the DOWN-reset scope (the 5-second hold
-  still erases exactly `ssid`/`password`/`updir`); the brightness percent,
-  the clock format and the channel order survive it.
+- The settings keys are NOT in the DOWN-reset scope (since S11 the 5-second
+  hold erases exactly `ssid`/`password`, and `updir` is cleared only by the
+  orientation recalibration above); the brightness percent, the clock
+  format and the channel order survive it.
 - The AP portal page keeps its own colour-order form (`POST /rgborder`, S7
   unchanged) and does **not** expose the brightness/clock settings: the task
   allowed it ("may"), but they are usable as soon as the board has LAN
@@ -311,7 +332,9 @@ receiver protocol parser runs, so the receiver's routes and the unknown-path
   remain the credential routes.
 
 Host verification: pure parsing/rendering/rules in `include/panel_settings.h`
-through `tests/settings_test.cpp` + `tests/test_settings.py`, brightness
+through `tests/settings_test.cpp` + `tests/test_settings.py` (including the
+T17 orientation route, page section, cleared page and the verified single-key
+`updir` clear), brightness
 value rules in `tests/display_settings_test.cpp`, 12/24 h geometry in
 `tests/idle_clock_test.cpp`, and structural wiring pins in
 `tests/test_settings.py`. Still unverified on hardware: the visual effect of
@@ -331,9 +354,11 @@ visible to others; otherwise provision over **USB** (`scripts/provision_wifi.py`
 
 ## Recovery
 
-- **Hold DOWN for 5 seconds** to erase `ssid`/`password`/`updir` (verified)
-  and restart: the cleared board is back at the boot gate — the portal, or
-  USB provisioning when a computer is attached.
+- **Hold DOWN for 5 seconds** to erase `ssid`/`password` (verified) and
+  restart: the cleared board is back at the boot gate — the portal, or USB
+  provisioning when a computer is attached. An upright reference that is
+  wrong (not lost) is fixed with the `/config` orientation recalibration or
+  the `ORIENT` USB console, never by this hold.
 - A bad save never bricks the board: the stored credentials are untouched
   on failure and the portal stays open.
 - To leave portal mode with the old configuration: power-cycle (or RESET).
