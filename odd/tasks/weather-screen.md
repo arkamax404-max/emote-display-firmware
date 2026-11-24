@@ -14,6 +14,8 @@ S4. Durations, user decision: "Reloj 20 s / tiempo 10 s" as the defaults, both c
 
 S5. TLS, user decision: "Sin validar el certificado" — the connection skips certificate validation, accepting that someone on the local network could intercept or forge the forecast. The data is not secret; the risk is accepted and recorded in the documentation.
 
+S6. Ciudad por defecto, del usuario (verbatim): "la ciudad por defecto será Sevilla" — una placa recién grabada, sin configurar nada, debe mostrar el parte de Sevilla en lugar de no mostrar nada.
+
 ## Implementation decisions
 
 - Provider: Open-Meteo, free and keyless. Forecast `https://api.open-meteo.com/v1/forecast` with `daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max`, `timezone=auto`, `forecast_days=4`, `latitude`/`longitude`; `temperature_unit=fahrenheit` only in °F mode. Geocoding `https://geocoding-api.open-meteo.com/v1/search?name=<city>&count=1&language=es`.
@@ -23,6 +25,7 @@ S5. TLS, user decision: "Sin validar el certificado" — the connection skips ce
 - Fetch: once the station is connected, then every 30 minutes, with a bounded connect/read timeout; a failed fetch keeps the previous forecast and never blocks the main loop. Requests are made only while connected; nothing is fetched in portal or AP mode.
 - Settings, persisted in `gentle` with read-back verification and the same verified-transaction discipline already used: `clocksecs` (5..120 step 5, default 20), `weathersecs` (5..120 step 5, default 10), `units` (0 = Celsius default, 1 = Fahrenheit), `citylat`, `citylon` (integers of micro-degrees to avoid float persistence), `cityname` (up to 24 bytes). None of these keys is in the DOWN-reset scope.
 - Portal `/config` gains a city text field with its own search action, the two duration fields and the unit choice, all validated with a reason on rejection and stored through the verified transaction; an invalid or failed search changes nothing.
+- Default city: `Sevilla`, latitud `37382830` y longitud `-5973170` en micro-grados, exactamente lo que devuelve la geocodificación de Open-Meteo para `name=Sevilla&language=es` (37.38283, -5.97317, zona `Europe/Madrid`). Es el valor inicial cuando no hay ciudad guardada, y no hace falta ninguna llamada de red para tenerlo.
 - `/health` gains additive fields only: `weather` (whether a forecast is currently held) and the resolved city name. No existing field changes meaning.
 - No new serial console command, and no change to `/emote`, the session controls, the PNG path, the diagnostics overlay, the Wi-Fi info overlay or the AP portal's existing routes.
 
@@ -39,3 +42,4 @@ T5 | S1-S5 | pending | Documentation (README and docs) and the full host suite; 
 L1. User request (verbatim): "la nueva feature implica al modo reloj, en este modo vamos a intercalar la pantalla del reloj con otra con informacion climatologica, vamos a dividir la pantalla en una cuadricula mostransdo el tiempo para hoy y la prevision de los proximos 3 días, usa una linea vertical y horizontal para la division. El tiempo que permanece el reloj y el tiempo lo haremos configurable en el portal, asi como la seleccion de la ciudad y si la temperatura va en grados celcius o farenhei"
 L2. Research: Open-Meteo is free, keyless and non-commercial-licensed, with a documented daily-forecast endpoint and a separate geocoding endpoint; it requires HTTPS on port 443, so the board needs TLS for the first time in this project.
 L3. Decisions taken by the user in this session: city by free text with geocoding (S2), cells showing temperatures and precipitation probability without icons (S3), defaults of 20 s clock and 10 s weather (S4), and no certificate validation (S5, accepted risk).
+L4. Decisión del usuario (verbatim): "la ciudad por defecto será Sevilla". Se fija `37.38283, -5.97317` (micro-grados `37382830` y `-5973170`), comprobado contra la propia API de geocodificación de Open-Meteo en lugar de escribirlo de memoria; zona horaria `Europe/Madrid`, coherente con la que ya usa el reloj.
