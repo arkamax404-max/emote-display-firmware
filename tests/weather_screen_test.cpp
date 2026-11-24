@@ -78,29 +78,6 @@ void expPixel(int x, int y, uint16_t color) {
   if (x >= 0 && x < 64 && y >= 0 && y < 64) expected[y * 64 + x] = color;
 }
 
-// The expected number formatting re-derives the documented rule with the
-// committed pure-layer helpers: stored tenths -> shown unit -> integer
-// degrees rounding half away from zero (SIGNED text; the sign itself is
-// consumed below).
-std::string degreesText(const weather::Forecast &f, int index, bool maximum,
-                        weather::Unit shown) {
-  const int16_t stored = maximum ? f.tmax[index] : f.tmin[index];
-  char buffer[12];
-  std::snprintf(buffer, sizeof buffer, "%d",
-                weather::roundedDegrees(
-                    weather::displayedTenths(stored, f.unit, shown)));
-  return buffer;
-}
-
-// S9: the displayed figure drops its minus glyph entirely; the colour
-// carries the sign. Returns the digit-only text and reports the sign.
-std::string degreesDigits(const weather::Forecast &f, int index, bool maximum,
-                          weather::Unit shown, bool &negative) {
-  const std::string signedText = degreesText(f, index, maximum, shown);
-  negative = !signedText.empty() && signedText[0] == '-';
-  return negative ? signedText.substr(1) : signedText;
-}
-
 // The documented probability rule: zero-padded two digits (100 keeps
 // three); the percent glyph follows the digits.
 std::string probText(uint8_t probability) {
@@ -136,11 +113,56 @@ const uint16_t PINNED_ICON_INK[7] = {idle_clock::AMBER, idle_clock::AMBER,
                                      idle_clock::BLUE, idle_clock::WHITE,
                                      idle_clock::AMBER};
 
-// S9: the intense blue of every negative figure, pinned RAW here (the
-// header builds it with idle_clock::rgb(64,64,255) = 0x421F — a deep
-// saturated blue, clearly distinct from the clock's sky-blue
-// rgb(85,189,232) = 0x55FD).
-constexpr uint16_t PINNED_NEG = 0x421F;
+// S10: the five temperature-band inks pinned RAW here (the cyan band is
+// numerically the clock's sky-blue, reused for the 0..14 range; the rain
+// icon keeps it too, in a different context), together with the neutral
+// ink of the probability. The BAND is chosen from the displayed value's
+// CELSIUS EQUIVALENT (unit-invariant banding: the thresholds always mean
+// the same physical temperature whatever unit the board paints, computed
+// as a single conversion from the stored tenths, so no double rounding);
+// the renderer's inkForDegrees() must agree exactly.
+constexpr uint16_t PINNED_COLD = 0x421F; // below 0: intense blue
+constexpr uint16_t PINNED_COOL = 0x55FD; // 0..14: cyan
+constexpr uint16_t PINNED_MILD = 0x4648; // 15..24: green
+constexpr uint16_t PINNED_WARM = 0xFDE0; // 25..37: amber
+constexpr uint16_t PINNED_HOT  = 0xF800; // 38 and above: red
+constexpr uint16_t PINNED_PROB = 0x95B4; // probability: muted neutral (S10)
+
+uint16_t pinInk(int celsiusDegrees) {
+  if (celsiusDegrees < 0) return PINNED_COLD;
+  if (celsiusDegrees <= 14) return PINNED_COOL;
+  if (celsiusDegrees <= 24) return PINNED_MILD;
+  if (celsiusDegrees <= 37) return PINNED_WARM;
+  return PINNED_HOT;
+}
+
+// S10/S11: one drawn temperature figure — its TEXT (the S11 rule keeps
+// the minus glyph only while the figure stays two glyphs, i.e. -1..-9;
+// from -10 on the sign is dropped and the colour carries it) and its BAND
+// ink (from the Celsius-equivalent displayed value).
+struct DrawnFigure { std::string text; uint16_t ink; };
+DrawnFigure drawFigure(const weather::Forecast &f, int index, bool maximum,
+                       weather::Unit shown) {
+  const int16_t stored = maximum ? f.tmax[index] : f.tmin[index];
+  const int value = weather::roundedDegrees(
+      weather::displayedTenths(stored, f.unit, shown));
+  const int bandDegrees = weather::roundedDegrees(
+      weather::displayedTenths(stored, f.unit, weather::Unit::Celsius));
+  DrawnFigure figure;
+  figure.ink = pinInk(bandDegrees);
+  char buffer[12];
+  if (value < 0) {
+    const unsigned magnitude = static_cast<unsigned>(-value);
+    if (magnitude < 10) // S11: -1..-9 keep their sign
+      std::snprintf(buffer, sizeof buffer, "-%u", magnitude);
+    else
+      std::snprintf(buffer, sizeof buffer, "%u", magnitude);
+  } else {
+    std::snprintf(buffer, sizeof buffer, "%u", static_cast<unsigned>(value));
+  }
+  figure.text = buffer;
+  return figure;
+}
 
 void expectCell(const Region &r, const weather::Forecast &f, int index,
                 int wday, weather::Unit shown) {
@@ -155,41 +177,36 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
   const std::string digits = probText(f.prob[index]);
   const int left = r.x0 + weather_screen::CELL -
                    (4 * (static_cast<int>(digits.size()) + 1) - 1);
-  idle_clock::text(digits.c_str(), left, r.y0 + 0, 1, idle_clock::AMBER,
+  idle_clock::text(digits.c_str(), left, r.y0 + 0, 1, PINNED_PROB,
                    expPixel);
   const int px = left + 4 * static_cast<int>(digits.size());
   for (int row = 0; row < 5; ++row)
     for (int col = 0; col < 3; ++col)
       if (weather_screen::PCT[row] & (4 >> col))
-        expPixel(px + col, r.y0 + 0 + row, idle_clock::AMBER);
+        expPixel(px + col, r.y0 + 0 + row, PINNED_PROB);
 
-  // S9: the digits lose their sign; the ink encodes it. A negative figure
-  // (maximum or minimum) is intense blue; a positive maximum stays white
-  // and the positive minimum is muted.
-  bool maxNegative = false, minNegative = false;
-  const std::string maximum = fitted(
-      degreesDigits(f, index, true, shown, maxNegative), 2);
-  idle_clock::text(maximum.c_str(), r.x0, r.y0 + 7, 2,
-                   maxNegative ? PINNED_NEG : idle_clock::WHITE, expPixel);
-  const std::string minimum = fitted(
-      degreesDigits(f, index, false, shown, minNegative), 2);
-  idle_clock::text(minimum.c_str(), r.x0, r.y0 + 19, 2,
-                   minNegative ? PINNED_NEG : idle_clock::MUTED, expPixel);
+  // S10: the band ink encodes the temperature; S11: the minus glyph
+  // survives only while the figure stays two glyphs.
+  const DrawnFigure maximum = drawFigure(f, index, true, shown);
+  idle_clock::text(fitted(maximum.text, 2).c_str(), r.x0, r.y0 + 7, 2,
+                   maximum.ink, expPixel);
+  const DrawnFigure minimum = drawFigure(f, index, false, shown);
+  idle_clock::text(fitted(minimum.text, 2).c_str(), r.x0, r.y0 + 19, 2,
+                   minimum.ink, expPixel);
 
-  // S8 (positions per S9 + the centring correction): the icon is drawn
-  // only when BOTH figures fit beside it — at most two signless digits
-  // each — and the day's WMO code belongs to a group; the unknown state
-  // has no bitmap. Its 8 px are CENTRED in the free space between the end
-  // of the WIDER of the two figures actually drawn and the cell's own
-  // right edge: figureW = 8*digits - 2, leftGap = (CELL - figureW - 7)/2
-  // (the odd pixel of an odd gap goes to the LEFT). d=1: icon at x0+15;
-  // d=2: icon at x0+19.
+  // S8 (S9 centring, drawn width): the icon is drawn only when BOTH drawn
+  // figures stay within two glyphs (S11: a drawn sign makes a single digit
+  // two) and the day's WMO code belongs to a group; the unknown state has
+  // no bitmap. Its 8 px are CENTRED in the free space between the end of
+  // the WIDER drawn figure and the cell's own right edge: figureW =
+  // 8*chars - 2, leftGap = (CELL - figureW - 7)/2 (the odd pixel of an odd
+  // gap goes to the LEFT).
   const weather::Icon icon = weather::iconFor(f.code[index]);
-  if (maximum.size() <= 2 && minimum.size() <= 2 &&
+  if (maximum.text.size() <= 2 && minimum.text.size() <= 2 &&
       icon != weather::Icon::Unknown) {
-    const int widest = static_cast<int>(maximum.size() > minimum.size()
-                                            ? maximum.size()
-                                            : minimum.size());
+    const int widest = static_cast<int>(
+        maximum.text.size() > minimum.text.size() ? maximum.text.size()
+                                                  : minimum.text.size());
     const int figureW = 8 * widest - 2;
     const int iconStart =
         r.x0 + figureW + (weather_screen::CELL - figureW - 7) / 2;
@@ -366,14 +383,129 @@ int main(int argc, char **argv) {
       CHECK(canvas[31 * 64 + i] == SENTINEL);
       CHECK(canvas[i * 64 + 31] == SENTINEL);
     }
-    CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_NEG));
-    CHECK(bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::WHITE));
-    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_NEG));
+    CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_COLD)); // -1000 °C
+    CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_HOT));  // +1000 °C
+    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_COLD));
+  } else if (test == "bands") {
+    // S10: every band boundary, both sides of every threshold, on the
+    // ROUNDED displayed Celsius value; exactly zero is COOL, not COLD.
+    const uint8_t prob[4] = {10, 45, 80, 5};
+    const uint8_t zeroCode[4] = {0, 0, 0, 0};
+    const std::tm calendar = makeCalendar(4);
+    {
+      const int16_t tmax[4] = {-50, 0, 140, 150};
+      const int16_t tmin[4] = {240, 250, 370, 380};
+      const weather::Forecast forecast =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, zeroCode);
+      realize(forecast, weather::Unit::Celsius, calendar);
+      CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
+      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_COLD));
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_COOL));
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_COOL));
+      CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_MILD));
+      CHECK(bandHas(canvas, ORIGIN[0], 19, 10, PINNED_MILD));
+      CHECK(bandHas(canvas, ORIGIN[1], 19, 10, PINNED_WARM));
+      CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_WARM));
+      CHECK(bandHas(canvas, ORIGIN[3], 19, 10, PINNED_HOT));
+      for (int i = 0; i < 4; ++i)
+        CHECK(!bandHas(canvas, ORIGIN[i], 7, 10, idle_clock::WHITE));
+    }
+    // Render B: the other side of every threshold, both ways, plus the
+    // single-rounding pin: -0.4 °C rounds to the displayed 0 and must be
+    // COOL (the band compares the ROUNDED value, never the raw tenths),
+    // and 24.5 °C rounds to 25 -> WARM while 24.4 stays MILD.
+    {
+      const int16_t tmax[4] = {-5, -4, 244, 245};
+      const int16_t tmin[4] = {145, 145, 145, 145}; // 14.5 °C rounds to 15
+      const weather::Forecast forecast =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, zeroCode);
+      realize(forecast, weather::Unit::Celsius, calendar);
+      CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
+      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_COLD)); // -1°C "-1"
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_COOL)); // 0°C "0"
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_MILD)); // 24
+      CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_WARM)); // 25
+      for (int i = 0; i < 4; ++i)
+        CHECK(bandHas(canvas, ORIGIN[i], 19, 10, PINNED_MILD)); // 15
+    }
+    // Render C (the pinned unit rule): a Fahrenheit board colours by the
+    // CELSIUS EQUIVALENT — 14.4 °C prints "58" in Fahrenheit (a naive
+    // Fahrenheit reading would fall near the warm band) but stays COOL;
+    // 15 °C prints "59" and is MILD; 37 °C prints "99" WARM; 38 °C prints
+    // "100" HOT. The same weather must show the same colour in °C and °F.
+    {
+      const int16_t tmax[4] = {144, 150, 370, 380};
+      const int16_t tmin[4] = {-50, -50, -50, -50}; // -5 °C in every cell
+      const weather::Forecast celsiusStored =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, zeroCode);
+      realize(celsiusStored, weather::Unit::Fahrenheit, calendar);
+      CHECK(canvas ==
+            expectDraw(celsiusStored, weather::Unit::Fahrenheit, calendar));
+      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_COOL)); // prints 58
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_MILD)); // prints 59
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_WARM)); // prints 99
+      CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_HOT));  // prints 100
+      for (int i = 0; i < 4; ++i)
+        CHECK(bandHas(canvas, ORIGIN[i], 19, 10, PINNED_COLD));
+      // A Fahrenheit-STORED record shown in Celsius bands from its
+      // Celsius equivalent too: 59 °F = 15 °C -> MILD (the exact-image
+      // match pins it; no white, no warm ink in the cell).
+      const int16_t ftmax[4] = {590, 590, 590, 590};
+      const weather::Forecast fahrenheitStored =
+          makeForecast(weather::Unit::Fahrenheit, ftmax, tmin, prob,
+                       zeroCode);
+      realize(fahrenheitStored, weather::Unit::Celsius, calendar);
+      CHECK(canvas ==
+            expectDraw(fahrenheitStored, weather::Unit::Celsius, calendar));
+      for (int i = 0; i < 4; ++i)
+        CHECK(bandHas(canvas, ORIGIN[i], 7, 10, PINNED_MILD));
+    }
+    // S11 in one image: -1..-9 print their dash, -10 and beyond do not;
+    // both keep the cold ink and the icon centred against the DRAWN
+    // width ("-5" and "10" both occupy two glyphs -> icon at 19; a
+    // bare "5" would centre at 15).
+    {
+      const int16_t tmax[4] = {-50, -100, 49, -250};
+      const int16_t tmin[4] = {120, 120, 120, 120}; // 12 °C MILD control
+      const weather::Forecast forecast =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, zeroCode);
+      realize(forecast, weather::Unit::Celsius, calendar);
+      CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
+      // "-5" (c0): dash at scaled rows 4..5 of the first glyph cell.
+      CHECK(canvas[(ORIGIN[0].y0 + 7 + 4) * 64 + ORIGIN[0].x0] ==
+            PINNED_COLD);
+      for (int dy = 0; dy < 4; ++dy)
+        CHECK(canvas[(ORIGIN[0].y0 + 7 + dy) * 64 + ORIGIN[0].x0] ==
+              SENTINEL);
+      // "10" (c1): signless, cold ink, AND two glyphs wide — the drawn
+      // width is the robust sign discriminator (a pixel probe would depend
+      // on the digit's own glyph shape, which may touch the dash row).
+      CHECK(rightmostInkInBand(canvas, ORIGIN[1], 7, 7) ==
+            ORIGIN[1].x0 + 13);
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_COLD));
+      // "5" (c2): ONE glyph, cool ink (5 °C sits in the 0..14 band) —
+      // a signed "-5" would span 13 columns.
+      CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
+            ORIGIN[2].x0 + 5);
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_COOL));
+      // "25" (c3): two-digit magnitude -> signless, cold ink.
+      CHECK(rightmostInkInBand(canvas, ORIGIN[3], 7, 7) ==
+            ORIGIN[3].x0 + 13);
+      CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_COLD));
+      // Drawn-width icon centring: c0 "-5" (2 glyphs) and c1 "10"
+      // (2 glyphs) both centre the icon at 19; a neighbouring one-glyph
+      // figure would centre at 15 (proven in the icons case).
+      CHECK(slotHasInk(canvas, 0, 19, 26));
+      CHECK(slotHasInk(canvas, 1, 19, 26));
+      for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
+        for (int x = ORIGIN[0].x0 + 14; x <= ORIGIN[0].x0 + 18; ++x)
+          CHECK(canvas[y * 64 + x] == SENTINEL); // gap left of the icon
+    }
   } else if (test == "values") {
     // Two-digit, three-digit, negative and zero temperatures; probabilities
-    // 0 (as 00%), single digit (07%) and three digits (100%). A negative
-    // minimum (-40) and a negative maximum (-5) are both drawn WITHOUT the
-    // minus glyph, in intense blue (S9).
+    // 0 (as 00%), single digit (07%) and three digits (100%). The negative
+    // minimum (-40) is signless and COLD; the negative maximum (-5) is
+    // SIGNED per S11, in the cold ink; the band ink is the value itself.
     const int16_t tmax[4] = {253, 1000, -52, 0};
     const int16_t tmin[4] = {0, -1, -400, 400};
     const uint8_t prob[4] = {0, 7, 100, 55};
@@ -383,37 +515,39 @@ int main(int argc, char **argv) {
     const std::tm calendar = makeCalendar(2); // MAR today
     realize(forecast, weather::Unit::Celsius, calendar);
     CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
-    // Band probes: positive maxima white (cells 0, 1, 3), positive minima
-    // muted instead of blue (S9), negative figures intense blue (cell 2
-    // maximum "5" and minimum "40").
-    for (int i : {0, 1, 3}) {
-      CHECK(bandHas(canvas, ORIGIN[i], 7, 10, idle_clock::WHITE));
-      CHECK(bandHas(canvas, ORIGIN[i], 19, 10, idle_clock::MUTED));
-      CHECK(!bandHas(canvas, ORIGIN[i], 7, 10, PINNED_NEG));
-      CHECK(!bandHas(canvas, ORIGIN[i], 19, 10, PINNED_NEG));
-    }
-    CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_NEG));
-    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_NEG));
-    CHECK(!bandHas(canvas, ORIGIN[2], 7, 10, idle_clock::WHITE));
-    // The label row keeps its muted day labels and amber probability at
-    // the cell's right edge on row 0 only.
+    // S10 band probes for every cell (the exact-image match pins glyph
+    // pixels): tmax {25.3→25 WARM, 100°C HOT, -5°C COLD signed, 0°C COOL};
+    // tmin {0 COOL, -0.1 rounds to 0 → COOL not COLD, -40 COLD, 40 HOT}.
+    CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_WARM));
+    CHECK(bandHas(canvas, ORIGIN[0], 19, 10, PINNED_COOL));
+    CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_HOT));
+    CHECK(bandHas(canvas, ORIGIN[1], 19, 10, PINNED_COOL));
+    CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_COLD));
+    CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_COLD));
+    CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_COOL));
+    CHECK(bandHas(canvas, ORIGIN[3], 19, 10, PINNED_HOT));
+    // The label row keeps its muted day labels and the NEUTRAL probability
+    // (S10: no longer amber) at the cell's right edge on row 0 only.
     for (int i = 0; i < 4; ++i) {
       CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::MUTED));
-      CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::AMBER));
-      CHECK(rightmostOf(canvas, ORIGIN[i], idle_clock::AMBER) ==
-            ORIGIN[i].x0 + 30);
+      CHECK(bandHas(canvas, ORIGIN[i], 0, 5, PINNED_PROB));
+      CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) == ORIGIN[i].x0 + 30);
       for (int y = ORIGIN[i].y0 + 22; y < ORIGIN[i].y0 + REGION_SPAN; ++y)
         for (int x = ORIGIN[i].x0; x < ORIGIN[i].x0 + REGION_SPAN; ++x)
           CHECK(canvas[y * 64 + x] != idle_clock::AMBER);
     }
-    // S9: the negative maximum of cell 2 starts with its digit, not with
-    // a dash — glyph "5" lights its top-left pixel at the cell origin in
-    // the NEGATIVE ink, whereas a drawn minus would place the dash lower
-    // (row y0+7+8..y0+7+9 at scale 2, the scaled glyph row 2) and leave
-    // the top rows blank.
-    CHECK(canvas[(ORIGIN[2].y0 + 7 + 0) * 64 + ORIGIN[2].x0] == PINNED_NEG);
+    // S11: cell 2's -5 prints its sign — the dash glyph occupies scaled
+    // rows y0+7+4..y0+7+5 at columns x0..x0+5, and nothing sits above it
+    // in the first glyph cell (a digit would start at the top).
+    CHECK(canvas[(ORIGIN[2].y0 + 7 + 4) * 64 + ORIGIN[2].x0] == PINNED_COLD);
     for (int dy = 0; dy < 4; ++dy)
-      CHECK(canvas[(ORIGIN[2].y0 + 7 + dy) * 64 + ORIGIN[2].x0] != SENTINEL);
+      CHECK(canvas[(ORIGIN[2].y0 + 7 + dy) * 64 + ORIGIN[2].x0] == SENTINEL);
+    // The signed figure is two glyphs wide: "-5" ends exactly where a
+    // two-digit figure would (the dash costs one glyph cell while it is
+    // drawn), keeping the icon centring well-defined. Scanned above the
+    // icon rows so the fog icon's own ink cannot masquerade as a digit.
+    CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
+          ORIGIN[2].x0 + 13);
   } else if (test == "icons") {
     // S7/S8/S9 layout proofs, one image per rule.
     const uint8_t prob[4] = {10, 45, 80, 5};
@@ -474,9 +608,10 @@ int main(int argc, char **argv) {
       }
       // Sanity: same slot geometry, different widths, different starts.
       CHECK(expectedStart[0] != expectedStart[1]);
-      // The probabilities still end at the cell's right edge on row 0.
+      // The probabilities (neutral muted ink, S10) still end at the
+      // cell's right edge on row 0.
       for (int i = 0; i < 4; ++i)
-        CHECK(rightmostOf(canvas, ORIGIN[i], idle_clock::AMBER) ==
+        CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) ==
               ORIGIN[i].x0 + 30);
     }
     { // (b) The three-glyph drop rule still holds, and an unknown WMO
@@ -511,10 +646,9 @@ int main(int argc, char **argv) {
       // (scanned above the slot rows so the icons' ink cannot interfere).
       CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 7) - ORIGIN[0].x0 ==
             rightmostInkInBand(canvas, ORIGIN[1], 7, 7) - ORIGIN[1].x0);
-      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, idle_clock::WHITE));
-      CHECK(!bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::WHITE));
-      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_NEG));
-      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, idle_clock::MUTED) == false);
+      CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_WARM)); // "25" both
+      CHECK(!bandHas(canvas, ORIGIN[1], 7, 10, PINNED_WARM));
+      CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_COLD));
       // No minus anywhere: nothing in either maximum band rows sits left
       // of the first digit — glyph "2" starts top-left at the origin.
       for (int i : {0, 1})
@@ -526,7 +660,7 @@ int main(int argc, char **argv) {
       CHECK(!slotHasInk(canvas, 2, 22, 26));
       CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
             ORIGIN[2].x0 + 21);
-      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_NEG));
+      CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_COLD));
       CHECK(slotHasInk(canvas, 3, 19, 26));
     }
   } else if (test == "units") {
@@ -613,11 +747,16 @@ int main(int argc, char **argv) {
                          });
     for (int p = 0; p < 64 * 64; ++p)
       CHECK(scaled[p] == (raw[p] == SENTINEL ? SENTINEL : panel::color(raw[p])));
-    CHECK(bandHas(scaled, ORIGIN[0], 7, 10, panel::color(PINNED_NEG)));
+    // S10 bands graded through panel::color: cell 0 maximum -52 °C
+    // (COLD) over a 3 °C minimum (COOL); cell 1 maximum 11 °C (COOL); the
+    // amber clear icon and the MUTED probability ink graded too.
+    CHECK(bandHas(scaled, ORIGIN[0], 7, 10, panel::color(PINNED_COLD)));
     CHECK(bandHas(scaled, ORIGIN[0], 19, 10,
-                  panel::color(idle_clock::MUTED)));
+                  panel::color(PINNED_COOL)));
     CHECK(bandHas(scaled, ORIGIN[1], 7, 10,
-                  panel::color(idle_clock::WHITE)));
+                  panel::color(PINNED_COOL)));
+    CHECK(bandHas(scaled, ORIGIN[0], 0, 5,
+                  panel::color(PINNED_PROB)));
     CHECK(bandHas(scaled, ORIGIN[0], 14, 8,
                   panel::color(idle_clock::AMBER)));
     CHECK(!(scaled == raw)); // 30 % default actually changed the values

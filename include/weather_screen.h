@@ -13,8 +13,9 @@
 // maximum at scale 2 and the minimum at scale 2 (same size; the maximum
 // is the primary figure), and the S8 8x8 icon for the day's WMO weather
 // code beside the temperature block, centred at draw time in the free
-// space its wider figure leaves. A negative figure loses its minus glyph
-// and is painted in intense blue (S9): the colour carries the sign. All text is drawn through the same 3x5 glyph
+// space its wider figure leaves, with every temperature figure coloured
+// by its five-band temperature scale (S10) that carries the sign from
+// -10 downwards (S11). All text is drawn through the same 3x5 glyph
 // table and text() helper the clock uses; the icons use the same plot
 // discipline with a small row-byte table of their own. Colors leave this
 // renderer raw 565; the pixel callback applies the shared brightness
@@ -42,20 +43,44 @@ constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19;
 constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 2;
 constexpr int ICON_Y = 14;
 
-// Inks (S9): a positive maximum is the white headline; the positive
-// minimum is the MUTED ink — blue used to mean "minimum", but now the
-// colour must mean the SIGN, so an unambiguous intense blue is reserved
-// for negative figures (drawn without a minus glyph). The muted minimum
-// still reads as the secondary figure through its lower brightness; the
-// minus-glyph drop is the derived consequence the user did not ask for
-// explicitly (see the task record).
-constexpr uint16_t INK_MAX = idle_clock::WHITE;
-constexpr uint16_t INK_MIN = idle_clock::MUTED;
-constexpr uint16_t INK_NEG =
-    idle_clock::rgb(64, 64, 255); // intense blue, not the clock's sky blue
+// Inks (S10): the colour encodes the TEMPERATURE, not the role — the role
+// (maximum, minimum) is carried by the position inside the cell. The five
+// bands are chosen from the displayed value's CELSIUS EQUIVALENT, rounded
+// exactly once at the place the display rounds, so the ink and the
+// printed figure can never disagree about which side of a threshold they
+// are on and a given weather colours identically in °C and °F modes:
+//   below 0: intense blue 0x421F   0..14: cyan 0x55FD
+//   15..24: green 0x4648          25..37: amber 0xFDE0
+//   38 and above: red 0xF800
+inline uint16_t inkForDegrees(int celsiusDegrees) {
+  if (celsiusDegrees < 0) return idle_clock::rgb(64, 64, 255);   // 0x421F
+  if (celsiusDegrees <= 14) return idle_clock::rgb(85, 189, 232); // 0x55FD
+  if (celsiusDegrees <= 24) return idle_clock::rgb(64, 200, 64);  // 0x4648
+  if (celsiusDegrees <= 37) return idle_clock::rgb(255, 191, 0);  // 0xFDE0
+  return idle_clock::rgb(255, 0, 0);                              // 0xF800
+}
+
+// S11: a negative figure keeps its minus glyph while the figure stays two
+// glyphs (-1..-9); from -10 on the sign is dropped (S9) and the cold ink
+// carries it.
+inline void figureText(int value, char (&buffer)[12], size_t &chars) {
+  if (value < 0) {
+    const unsigned magnitude = static_cast<unsigned>(-value);
+    if (magnitude < 10)
+      std::snprintf(buffer, sizeof buffer, "-%u", magnitude);
+    else
+      std::snprintf(buffer, sizeof buffer, "%u", magnitude);
+  } else {
+    std::snprintf(buffer, sizeof buffer, "%u", static_cast<unsigned>(value));
+  }
+  chars = std::strlen(buffer);
+}
 
 constexpr uint16_t INK_LABEL = idle_clock::MUTED;
-constexpr uint16_t INK_PROB = idle_clock::AMBER;
+// S10: the probability leaves amber (it would share the tone of the warm
+// band); it takes the same neutral, low-weight muted ink as the day
+// labels — present without competing with any temperature colour.
+constexpr uint16_t INK_PROB = idle_clock::MUTED;
 
 // The clock glyph table has no percent sign, and the table is shared with
 // the clock (its bitmaps must never move), so the one missing glyph is
@@ -154,23 +179,22 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
       if (PCT[row] & (4 >> col))
         plot(px + col, y0 + DY_LABEL + row, INK_PROB);
   // S7: both temperatures at scale 2 — the maximum is the primary value.
-  // S9: a negative figure is drawn WITHOUT the minus glyph, in intense
-  // blue; a positive maximum stays white and the positive minimum is
-  // muted, so the colour alone carries the sign at a glance.
+  // S10: the ink is the band of the displayed value's Celsius equivalent
+  // (rounded exactly once, like the printed figure); S11: the minus glyph
+  // survives only while the figure stays two glyphs.
+  size_t maxChars = 0, minChars = 0;
   int value = weather::roundedDegrees(weather::displayedTenths(
       forecast.tmax[index], forecast.unit, shown));
-  const bool maxNegative = value < 0;
-  std::snprintf(buffer, sizeof buffer, "%u",
-                static_cast<unsigned>(maxNegative ? -value : value));
-  put(buffer, DY_MAX, SCALE_MAX, maxNegative ? INK_NEG : INK_MAX);
-  const size_t maxChars = std::strlen(buffer);
+  figureText(value, buffer, maxChars);
+  put(buffer, DY_MAX, SCALE_MAX,
+      inkForDegrees(weather::roundedDegrees(weather::displayedTenths(
+          forecast.tmax[index], forecast.unit, weather::Unit::Celsius))));
   value = weather::roundedDegrees(weather::displayedTenths(
       forecast.tmin[index], forecast.unit, shown));
-  const bool minNegative = value < 0;
-  std::snprintf(buffer, sizeof buffer, "%u",
-                static_cast<unsigned>(minNegative ? -value : value));
-  put(buffer, DY_MIN, SCALE_MIN, minNegative ? INK_NEG : INK_MIN);
-  const size_t minChars = std::strlen(buffer);
+  figureText(value, buffer, minChars);
+  put(buffer, DY_MIN, SCALE_MIN,
+      inkForDegrees(weather::roundedDegrees(weather::displayedTenths(
+          forecast.tmin[index], forecast.unit, weather::Unit::Celsius))));
   // S8: the 8x8 icon for the day's WMO code, CENTRED in the free space of
   // its own cell at draw time: its columns are computed from the WIDER of
   // the two figures actually drawn, so it never sits closer to one

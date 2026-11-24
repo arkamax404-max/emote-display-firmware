@@ -7,7 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class WeatherScreenTests(unittest.TestCase):
-    """T2 (S1, S3, S7, S8, S9): the weather screen renderer, host-tested on
+    """T2 (S1, S3, S7-S11): the weather screen renderer, host-tested on
     a 64x64 canvas — the four 31x31 cells (per S7: label and probability
     sharing the top row, the probability at the cell's right edge, both
     temperatures at scale 2), the S8 icon centred at draw time in the
@@ -38,6 +38,7 @@ class WeatherScreenTests(unittest.TestCase):
     def test_oversized_values_truncate_without_crossing_a_divider(self): self.run_case("truncation")
     def test_digit_counts_signs_and_probability_formatting(self): self.run_case("values")
     def test_icon_slot_rules_and_the_three_digit_drop(self): self.run_case("icons")
+    def test_temperature_bands_at_every_threshold_in_both_units(self): self.run_case("bands")
     def test_shown_unit_converts_the_stored_tenths(self): self.run_case("units")
     def test_hoy_and_the_weekday_labels_track_the_calendar(self): self.run_case("labels")
     def test_no_valid_forecast_paints_nothing(self): self.run_case("invalid")
