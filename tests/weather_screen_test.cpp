@@ -147,8 +147,9 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
   // S7 offsets: label y+0 (scale 1) with the probability right-aligned ON
   // THE SAME ROW — its '%' ends exactly at the cell's own edge, column
   // x0+30; maximum y+7 (scale 2); minimum y+19 (scale 2, same size, the
-  // maximum reads first). The icon slot (S9) sits eight columns wide from
-  // x0+19 to x0+26, over the vertical middle rows (y0+14..y0+21).
+  // maximum reads first). The icon (S8/S9, centred at draw time between
+  // the wider figure and the cell's right edge) spans the vertical middle
+  // rows (y0+14..y0+21).
   idle_clock::text(weather::dayLabel(static_cast<size_t>(index), wday), r.x0,
                    r.y0 + 0, 1, idle_clock::MUTED, expPixel);
   const std::string digits = probText(f.prob[index]);
@@ -175,18 +176,28 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
   idle_clock::text(minimum.c_str(), r.x0, r.y0 + 19, 2,
                    minNegative ? PINNED_NEG : idle_clock::MUTED, expPixel);
 
-  // S8 (positions per S9): the icon is drawn only when BOTH figures fit
-  // beside it — the sign no longer costs a glyph cell, so only a
-  // three-digit (or longer, fitted) figure collides — and the day's WMO
-  // code belongs to a group; the unknown state has no bitmap.
+  // S8 (positions per S9 + the centring correction): the icon is drawn
+  // only when BOTH figures fit beside it — at most two signless digits
+  // each — and the day's WMO code belongs to a group; the unknown state
+  // has no bitmap. Its 8 px are CENTRED in the free space between the end
+  // of the WIDER of the two figures actually drawn and the cell's own
+  // right edge: figureW = 8*digits - 2, leftGap = (CELL - figureW - 7)/2
+  // (the odd pixel of an odd gap goes to the LEFT). d=1: icon at x0+15;
+  // d=2: icon at x0+19.
   const weather::Icon icon = weather::iconFor(f.code[index]);
   if (maximum.size() <= 2 && minimum.size() <= 2 &&
       icon != weather::Icon::Unknown) {
+    const int widest = static_cast<int>(maximum.size() > minimum.size()
+                                            ? maximum.size()
+                                            : minimum.size());
+    const int figureW = 8 * widest - 2;
+    const int iconStart =
+        r.x0 + figureW + (weather_screen::CELL - figureW - 7) / 2;
     const int which = static_cast<int>(icon);
     for (int row = 0; row < 8; ++row)
       for (int col = 0; col < 8; ++col)
         if (PINNED_ICONS[which][row] & (0x80 >> col))
-          expPixel(r.x0 + 19 + col, r.y0 + 14 + row, PINNED_ICON_INK[which]);
+          expPixel(iconStart + col, r.y0 + 14 + row, PINNED_ICON_INK[which]);
   }
 }
 
@@ -418,86 +429,79 @@ int main(int argc, char **argv) {
       }
       return false;
     };
-    { // (a) Row 0: label left, probability right-aligned at x0+30; both
-      // temperatures ten rows tall; icons for group codes, 4 px further
-      // left than before.
-      const int16_t tmax[4] = {250, 1000, 253, 98};
-      const int16_t tmin[4] = {120, -25, 1000, 12};
+    { // (a) Centring: the icon sits in the middle of the free space of its
+      // own cell, computed from the WIDER figure, not at a fixed column.
+      // Cells: c0 (2,2) digits, c1 (1,1), c2 (2,1), c3 (1,2) — the mixed
+      // cells align the icon against the wider figure.
+      const int16_t tmax[4] = {253, 49, 253, 49};
+      const int16_t tmin[4] = {120, 12, 9, 120};
       const uint8_t code[4] = {0, 63, 3, 95};
-      const weather::Forecast rendered =
-          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, code);
       CHECK(!render(tmax, tmin, code));
+      // Expected icon start offset from the cell origin: figureW = 8d-2,
+      // leftGap = (CELL - figureW - 7)/2, icon = figureW + leftGap.
+      // d=2 -> 19, d=1 -> 15. A one-digit cell (c1) and a two-digit cell
+      // (c0) in the same slot geometry therefore differ, and the mixed
+      // cells (c2, c3) follow the WIDER figure.
+      const int expectedStart[4] = {19, 15, 19, 19};
+      const int figureW[4] = {14, 6, 14, 14};
       for (int i = 0; i < 4; ++i) {
-        bool minNegative = false;
-        degreesDigits(rendered, i, false, weather::Unit::Celsius, minNegative);
-        const uint16_t minInk = minNegative ? PINNED_NEG : idle_clock::MUTED;
+        const Region &r = ORIGIN[i];
+        const int start = r.x0 + expectedStart[i];
+        // The icon is present exactly in its computed columns.
+        bool present = false;
+        for (int y = r.y0 + 14; y < r.y0 + 22; ++y)
+          for (int x = start; x <= start + 7; ++x)
+            if (canvas[y * 64 + x] != SENTINEL) present = true;
+        CHECK(present);
+        // The gaps on both sides of the icon: columns between the end of
+        // the wider figure and the icon start (left), and between the
+        // icon's last column and the cell's last column (right, column
+        // x0+30 included via <= 30). Left gap must equal the right gap,
+        // allowing exactly the one odd pixel — which goes to the LEFT.
+        const int leftGap = expectedStart[i] - figureW[i];
+        const int rightGap = 30 - (expectedStart[i] + 7);
+        CHECK(leftGap == rightGap || leftGap == rightGap + 1);
+        CHECK(leftGap > 0); // the icon never touches a figure
+        for (int y = r.y0 + 14; y < r.y0 + 22; ++y) {
+          for (int x = r.x0 + figureW[i]; x < start; ++x)
+            CHECK(canvas[y * 64 + x] == SENTINEL); // left gap empty
+          for (int x = start + 8; x <= r.x0 + 30; ++x)
+            CHECK(canvas[y * 64 + x] == SENTINEL); // right gap empty
+        }
+        // The icon never reaches the cell's last column (all four cells
+        // have narrow figures here) and never leaves the cell.
+        CHECK(expectedStart[i] + 7 <= 26);
+      }
+      // Sanity: same slot geometry, different widths, different starts.
+      CHECK(expectedStart[0] != expectedStart[1]);
+      // The probabilities still end at the cell's right edge on row 0.
+      for (int i = 0; i < 4; ++i)
         CHECK(rightmostOf(canvas, ORIGIN[i], idle_clock::AMBER) ==
               ORIGIN[i].x0 + 30);
-        CHECK(bandHas(canvas, ORIGIN[i], 0, 1, idle_clock::AMBER));
-        // The same height: for sign-free numbers every one of the digit
-        // glyphs lights all five rows, so the maximum band rows y0+7..y0+16
-        // and the minimum band rows y0+19..y0+28 are all ten rows tall.
-        for (int dy = 0; dy < 10; ++dy) {
-          CHECK(bandHas(canvas, ORIGIN[i], 7 + dy, 1, idle_clock::WHITE));
-          CHECK(bandHas(canvas, ORIGIN[i], 19 + dy, 1, minInk));
-        }
-      }
-      // The icon slot: cells 0 (clear) and 3 (storm) carry ink; cells 1
-      // (three-digit maximum) and 2 (three-digit minimum) do not. For the
-      // dropped cells the probe starts past column 21: their kept three-
-      // glyph figures reach x0+21 and overlap the slot's rows.
-      CHECK(slotHasInk(canvas, 0));
-      CHECK(slotHasInk(canvas, 3));
-      CHECK(!slotHasInk(canvas, 1, 22, 26));
-      CHECK(!slotHasInk(canvas, 2, 22, 26));
-      // S9: the icon lives four columns further left — its leftmost ink
-      // column is exactly x0+19, and the four OLD slot columns
-      // x0+27..x0+30 are now untouched sentinel.
-      int leftmostIcon = -1;
-      for (int x = ORIGIN[0].x0 + 19; x <= ORIGIN[0].x0 + 26; ++x)
-        for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
-          if (canvas[y * 64 + x] == idle_clock::AMBER &&
-              (leftmostIcon < 0 || x < leftmostIcon))
-            leftmostIcon = x;
-      CHECK(leftmostIcon == ORIGIN[0].x0 + 19); // 23 - 4 = 19
-      for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
-        for (int x = ORIGIN[0].x0 + 27; x <= ORIGIN[0].x0 + 30; ++x)
-          CHECK(canvas[y * 64 + x] == SENTINEL); // old right columns free
-      // The icon never touches the figures: cell 0's maximum "25" ends at
-      // column x0+13 at scale 2, the icon starts at x0+19, so columns
-      // x0+14..x0+18 stay empty in the maximum band rows. The width probe
-      // scans only rows y0+7..y0+13 — above the icon slot rows, so the
-      // icon's own ink cannot masquerade as a digit.
-      CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 7) ==
-            ORIGIN[0].x0 + 13);
-      for (int y = ORIGIN[0].y0 + 7; y <= ORIGIN[0].y0 + 16; ++y)
-        for (int x = ORIGIN[0].x0 + 14; x <= ORIGIN[0].x0 + 18; ++x)
-          CHECK(canvas[y * 64 + x] == SENTINEL);
-      // The three-drop rule keeps EVERY digit: "100" (white) spans
-      // columns x0..x0+21 (scanned above the slot rows) with the slot
-      // beside it empty... and the minimum of cell 2 ("100") is what drops
-      // cell 2's icon — cell 2's own maximum "25" would have fit alone.
-      CHECK(rightmostInkInBand(canvas, ORIGIN[1], 7, 7) ==
-            ORIGIN[1].x0 + 21);
-      CHECK(rightmostInkInBand(canvas, ORIGIN[2], 19, 4) ==
-            ORIGIN[2].x0 + 21);
-      // Nothing paints past the slot's right edge into the spare column.
-      CHECK(canvas[(ORIGIN[0].y0 + 14) * 64 + ORIGIN[0].x0 + 27] == SENTINEL);
     }
-    { // (b) Unknown codes draw no icon even when both numbers fit.
-      const int16_t tmax[4] = {250, 250, 253, 98};
-      const int16_t tmin[4] = {120, 120, 12, 12};
-      const uint8_t code[4] = {0, 44, 45, 48};
+    { // (b) The three-glyph drop rule still holds, and an unknown WMO
+      // code still draws no icon even when both figures fit: c0 drops for
+      // its three-digit MAXIMUM, c1 for its three-digit MINIMUM (every
+      // digit kept), c2 carries the unknown code 44, c3 is the known-code
+      // control whose icon sits at its width-computed columns.
+      const int16_t tmax[4] = {1000, 250, 250, 98};
+      const int16_t tmin[4] = {120, 1000, 120, 12};
+      const uint8_t code[4] = {0, 2, 44, 0};
       CHECK(!render(tmax, tmin, code));
-      CHECK(slotHasInk(canvas, 0));  // clear
-      CHECK(!slotHasInk(canvas, 1)); // code 44: outside every group
-      CHECK(slotHasInk(canvas, 2));  // fog (45)
-      CHECK(slotHasInk(canvas, 3));  // rime fog (48)
+      CHECK(!slotHasInk(canvas, 0, 22, 30)); // dropped, three-digit max
+      CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 10) ==
+            ORIGIN[0].x0 + 21); // "100" kept whole
+      CHECK(!slotHasInk(canvas, 1, 22, 30)); // dropped, three-digit min
+      CHECK(rightmostInkInBand(canvas, ORIGIN[1], 19, 10) ==
+            ORIGIN[1].x0 + 21); // "100" kept whole
+      CHECK(!slotHasInk(canvas, 2, 19, 26)); // unknown code: no icon
+      CHECK(slotHasInk(canvas, 3, 19, 26));  // control: icon present
     }
-    { // (c) S9: the sign lives in the colour, not in a glyph — "-5" and
-      // "5" render with the SAME digit width, the negative maximum is
-      // intense blue and the positive one white; "-100" drops the icon
-      // exactly like "100", keeping every digit.
+    { // (c) S9 sign rule under centring: "-5" and "5" render with the SAME
+      // digit width, the negative maximum is intense blue and the positive
+      // one white; "-100" drops the icon exactly like "100", keeping every
+      // digit; "-5" beside a two-figure minimum keeps the icon, aligned
+      // against the wider (two-digit) minimum.
       const int16_t tmax[4] = {250, -250, -1000, -52};
       const int16_t tmin[4] = {120, 120, 12, 12};
       const uint8_t code[4] = {0, 0, 0, 0};
@@ -517,12 +521,13 @@ int main(int argc, char **argv) {
         CHECK(canvas[(ORIGIN[i].y0 + 7) * 64 + ORIGIN[i].x0] != SENTINEL);
       // "-100" (cell 2): the icon drops, all three digits kept in the
       // intense blue; the slot probe starts past the kept figure's last
-      // column (x0+21). "-5" (cell 3): three glyphs become two, icon kept.
+      // column (x0+21). "-5" (cell 3, beside the two-digit minimum): icon
+      // kept at the 19 offset of a 2-digit widest figure.
       CHECK(!slotHasInk(canvas, 2, 22, 26));
       CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
             ORIGIN[2].x0 + 21);
       CHECK(bandHas(canvas, ORIGIN[2], 7, 10, PINNED_NEG));
-      CHECK(slotHasInk(canvas, 3));
+      CHECK(slotHasInk(canvas, 3, 19, 26));
     }
   } else if (test == "units") {
     // A Celsius-stored forecast shown in Fahrenheit converts through the

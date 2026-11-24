@@ -10,7 +10,8 @@ class WeatherScreenTests(unittest.TestCase):
     """T2 (S1, S3, S7, S8, S9): the weather screen renderer, host-tested on
     a 64x64 canvas — the four 31x31 cells (per S7: label and probability
     sharing the top row, the probability at the cell's right edge, both
-    temperatures at scale 2), the S8 icon slot rules, the S9 absence of
+    temperatures at scale 2), the S8 icon centred at draw time in the
+    free space its wider figure leaves, the S9 absence of
     separator lines, the S9 sign-by-colour rule (negative figures in
     intense blue without a minus glyph, positive minimum muted), per-cell
     isolation, the truncation rule, unit conversion and the shared

@@ -12,9 +12,9 @@
 // probability NN% right-aligned on the very same top row (S7), then the
 // maximum at scale 2 and the minimum at scale 2 (same size; the maximum
 // is the primary figure), and the S8 8x8 icon for the day's WMO weather
-// code beside the temperature block when both figures fit. A negative
-// figure loses its minus glyph and is painted in intense blue (S9): the
-// colour carries the sign. All text is drawn through the same 3x5 glyph
+// code beside the temperature block, centred at draw time in the free
+// space its wider figure leaves. A negative figure loses its minus glyph
+// and is painted in intense blue (S9): the colour carries the sign. All text is drawn through the same 3x5 glyph
 // table and text() helper the clock uses; the icons use the same plot
 // discipline with a small row-byte table of their own. Colors leave this
 // renderer raw 565; the pixel callback applies the shared brightness
@@ -34,12 +34,13 @@ constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
 // Row offsets inside a cell (S7): label y+0 (scale 1) with the probability
 // right-aligned on that same row (the '%' ends at the cell's own edge,
 // column x0+30); maximum y+7 and minimum y+19, both at scale 2. The icon
-// (S8, moved 4 px left by S9) occupies the eight columns x0+19..x0+26
-// over the vertical middle rows y0+14..y0+21. The last painted row is
-// y+28, one row short of the region end.
+// (S8/S9) is CENTRED AT DRAW TIME between the end of the wider of the two
+// figures actually drawn and the cell's own right edge, over the vertical
+// middle rows y0+14..y0+21 — never a fixed column, so it leans neither to
+// a figure nor to the edge. The last painted row is y+28.
 constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19;
 constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 2;
-constexpr int ICON_X = 19, ICON_Y = 14;
+constexpr int ICON_Y = 14;
 
 // Inks (S9): a positive maximum is the white headline; the positive
 // minimum is the MUTED ink — blue used to mean "minimum", but now the
@@ -170,23 +171,34 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
                 static_cast<unsigned>(minNegative ? -value : value));
   put(buffer, DY_MIN, SCALE_MIN, minNegative ? INK_NEG : INK_MIN);
   const size_t minChars = std::strlen(buffer);
-  // S8: the 8x8 icon for the day's WMO code, 4 px further left than the
-  // first revision (S9), right-anchored in its slot and vertically
-  // centred on the temperature block. It is drawn only when BOTH numbers
-  // fit beside it: at scale 2 any figure wider than two characters (any
-  // three-digit magnitude; the sign no longer costs a glyph cell, since
-  // S9 removed it) leaves fewer than two clear columns before the slot,
-  // so in that cell the icon is omitted and the FULL number is kept — a
+  // S8: the 8x8 icon for the day's WMO code, CENTRED in the free space of
+  // its own cell at draw time: its columns are computed from the WIDER of
+  // the two figures actually drawn, so it never sits closer to one
+  // temperature row than to the other and cannot overlap either. A
+  // scale-2 figure of n signless digits is 8n-2 px wide, so with d = the
+  // larger drawn digit count:
+  //   figureEnd = 8d - 2 (last column of that figure),
+  //   leftGap   = (CELL - figureEnd - 7) / 2  (the odd pixel of an odd
+  //               gap goes to the LEFT: the icon leans one pixel towards
+  //               the cell's own right edge),
+  //   iconX     = x0 + figureEnd + leftGap  (== x0 + 11 + 4d).
+  // d=1 -> icon at x0+15; d=2 -> icon at x0+19; the two figures can drop
+  // the icon below: at scale 2 any figure wider than two signless digits
+  // (any three-digit magnitude) leaves fewer than two clear columns, so
+  // in that cell the icon is omitted and the FULL number is kept — a
   // temperature is never truncated to make room for the icon. The
   // unknown group (a code outside every group) has no bitmap and simply
   // shows no icon.
   const weather::Icon icon = weather::iconFor(forecast.code[index]);
   if (maxChars <= 2 && minChars <= 2 && icon != weather::Icon::Unknown) {
+    const size_t widest = maxChars > minChars ? maxChars : minChars;
+    const int figureEnd = 8 * static_cast<int>(widest) - 2;
+    const int iconX = x0 + figureEnd + (CELL - figureEnd - 7) / 2;
     const int which = static_cast<int>(icon);
     for (int row = 0; row < 8; ++row)
       for (int col = 0; col < 8; ++col)
         if (ICONS[which][row] & (0x80 >> col))
-          plot(x0 + ICON_X + col, y0 + ICON_Y + row, ICON_INK[which]);
+          plot(iconX + col, y0 + ICON_Y + row, ICON_INK[which]);
   }
 }
 
