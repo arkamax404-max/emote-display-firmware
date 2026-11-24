@@ -63,14 +63,19 @@ using Canvas = std::array<uint16_t, 64 * 64>;
 // outside everything the renderer can emit for the palette it uses.
 constexpr uint16_t SENTINEL = 0x5a5a;
 
-// The documented cell origins: today top left, +1 top right, +2 bottom
-// left, +3 bottom right. Each cell owns a 31x31 area [x0, x0+30] x
-// [y0, y0+30]; the empty column 31 and the empty crossing of column 32 /
-// row 32 keep every cell clear of its neighbours (S9: no line is drawn
-// anywhere).
+// The documented cell origins (S12/S13 margins): today top left, +1 top
+// right, +2 bottom left, +3 bottom right. Each cell owns a 30x30 area
+// [x0, x0+29] x [y0, y0+29]: columns 0/63 and rows 0/63 stay dark, each
+// border keeping a one-pixel margin, so the left cells begin at x=1 (30
+// px of useful width) and the right cells end one column in (columns
+// 33..62), while the top cells begin one row down and the bottom cells
+// end one row up (rows 1..30 and 33..62 — the bottom cell's last painted
+// row is 62, with row 63 dark); the empty columns 31/32 and rows 31/32
+// keep every cell clear of its neighbours (S9: no line is drawn anywhere).
 struct Region { int x0, y0; };
-const Region ORIGIN[4] = {{0, 0}, {33, 0}, {0, 33}, {33, 33}};
-constexpr int REGION_SPAN = 31;
+const Region ORIGIN[4] = {{1, 1}, {33, 1}, {1, 33}, {33, 33}};
+constexpr int REGION_W = 30; // useful width after the S12 margins
+constexpr int REGION_H = 30; // useful height after the S13 margins
 
 Canvas canvas, expected;
 
@@ -87,12 +92,13 @@ std::string probText(uint8_t probability) {
 }
 
 // The truncation rule re-derived here (NOT taken from the header under
-// test): a word wider than the 31 px cell loses whole trailing characters
-// until it fits; width = 4*chars*scale - scale for the 3x5 glyph engine.
+// test): a word wider than the 30 px cell (S12) loses whole trailing
+// characters until it fits; width = 4*chars*scale - scale for the 3x5
+// glyph engine.
 std::string fitted(const std::string &value, int scale) {
   size_t n = value.size();
   while (n > 1 && 4 * static_cast<int>(n) * scale - scale >
-                      weather_screen::CELL)
+                      weather_screen::CELL_W)
     --n;
   return value.substr(0, n);
 }
@@ -168,14 +174,15 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
                 int wday, weather::Unit shown) {
   // S7 offsets: label y+0 (scale 1) with the probability right-aligned ON
   // THE SAME ROW — its '%' ends exactly at the cell's own edge, column
-  // x0+30; maximum y+7 (scale 2); minimum y+19 (scale 2, same size, the
-  // maximum reads first). The icon (S8/S9, centred at draw time between
+  // x0+29 (S12: one column inside the canvas edge); maximum y+7 (scale 2);
+  // minimum y+19 (scale 2, same size, the maximum reads first). The icon
+  // (S8/S9, centred at draw time between
   // the wider figure and the cell's right edge) spans the vertical middle
   // rows (y0+14..y0+21).
   idle_clock::text(weather::dayLabel(static_cast<size_t>(index), wday), r.x0,
                    r.y0 + 0, 1, idle_clock::MUTED, expPixel);
   const std::string digits = probText(f.prob[index]);
-  const int left = r.x0 + weather_screen::CELL -
+  const int left = r.x0 + weather_screen::CELL_W -
                    (4 * (static_cast<int>(digits.size()) + 1) - 1);
   idle_clock::text(digits.c_str(), left, r.y0 + 0, 1, PINNED_PROB,
                    expPixel);
@@ -209,7 +216,7 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
                                                   : minimum.text.size());
     const int figureW = 8 * widest - 2;
     const int iconStart =
-        r.x0 + figureW + (weather_screen::CELL - figureW - 7) / 2;
+        r.x0 + figureW + (weather_screen::CELL_W - figureW - 7) / 2;
     const int which = static_cast<int>(icon);
     for (int row = 0; row < 8; ++row)
       for (int col = 0; col < 8; ++col)
@@ -246,7 +253,7 @@ void realize(const weather::Forecast &f, weather::Unit shown,
 bool bandHas(const Canvas &c, const Region &r, int dy, int rowspan,
              uint16_t color) {
   for (int y = r.y0 + dy; y < r.y0 + dy + rowspan; ++y)
-    for (int x = r.x0; x < r.x0 + REGION_SPAN; ++x)
+    for (int x = r.x0; x < r.x0 + REGION_W; ++x)
       if (c[y * 64 + x] == color) return true;
   return false;
 }
@@ -266,8 +273,8 @@ bool slotHasInk(const Canvas &c, int index, int from = 19, int to = 26) {
 
 // The rightmost painted column of one colour inside the cell's region.
 int rightmostOf(const Canvas &c, const Region &r, uint16_t color) {
-  for (int x = r.x0 + REGION_SPAN - 1; x >= r.x0; --x)
-    for (int y = r.y0; y < r.y0 + REGION_SPAN; ++y)
+  for (int x = r.x0 + REGION_W - 1; x >= r.x0; --x)
+    for (int y = r.y0; y < r.y0 + REGION_H; ++y)
       if (c[y * 64 + x] == color) return x;
   return -1;
 }
@@ -277,7 +284,7 @@ int rightmostOf(const Canvas &c, const Region &r, uint16_t color) {
 int rightmostInkInBand(const Canvas &c, const Region &r, int dy, int rowspan) {
   int rightmost = -1;
   for (int y = r.y0 + dy; y < r.y0 + dy + rowspan; ++y)
-    for (int x = r.x0; x < r.x0 + REGION_SPAN; ++x)
+    for (int x = r.x0; x < r.x0 + REGION_W; ++x)
       if (c[y * 64 + x] != SENTINEL) rightmost = x;
   return rightmost;
 }
@@ -327,6 +334,10 @@ int main(int argc, char **argv) {
       CHECK(canvas[i * 64 + 32] == SENTINEL);
       CHECK(canvas[i * 64 + 31] == SENTINEL);
       CHECK(canvas[31 * 64 + i] == SENTINEL);
+      CHECK(canvas[i * 64 + 0] == SENTINEL);  // S12: nothing in column 0
+      CHECK(canvas[i * 64 + 63] == SENTINEL); // S12: equal right margin
+      CHECK(canvas[0 * 64 + i] == SENTINEL);  // S13: nothing in row 0
+      CHECK(canvas[63 * 64 + i] == SENTINEL); // S13: equal bottom margin
     }
     if (test == "cells") {
       // Mutating ONE cell's inputs may move pixels only inside that cell's
@@ -346,8 +357,8 @@ int main(int argc, char **argv) {
           if (canvas[p] != base[p]) {
             ++differences;
             const int x = p % 64, y = p / 64;
-            if (x < ORIGIN[i].x0 || x >= ORIGIN[i].x0 + REGION_SPAN ||
-                y < ORIGIN[i].y0 || y >= ORIGIN[i].y0 + REGION_SPAN)
+            if (x < ORIGIN[i].x0 || x >= ORIGIN[i].x0 + REGION_W ||
+                y < ORIGIN[i].y0 || y >= ORIGIN[i].y0 + REGION_H)
               outside = true;
           }
         CHECK(differences > 0);
@@ -369,20 +380,33 @@ int main(int argc, char **argv) {
     const std::tm calendar = makeCalendar(0); // DOM today
     realize(forecast, weather::Unit::Celsius, calendar);
     CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
-    // Explicit proof that the extreme cells stay inside their region: the
-    // four-glyph maximum/minimum bands end at column x0+29, the spare
-    // column 31 stays empty and — with the dividers gone — even column 32
-    // and row 32 carry nothing at all.
+    // Explicit proof that the extreme cells stay inside their region, S12
+    // edition: the 30 px four-glyph figures now fill the narrowed cell
+    // EXACTLY — the maximum bands of cells 0 and 1 end at their own last
+    // column x0+29 (canvas columns 30 and 62), so every digit stays whole
+    // inside the cell it belongs to; the separation columns 31/32 stay
+    // empty and — with the dividers gone — even column 32 and row 32
+    // carry nothing at all. The S12 marginal columns 0 and 63 stay dark
+    // in every row.
+    CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 10) == ORIGIN[0].x0 + 29);
+    CHECK(rightmostInkInBand(canvas, ORIGIN[1], 7, 10) == ORIGIN[1].x0 + 29);
+    CHECK(rightmostInkInBand(canvas, ORIGIN[2], 19, 10) == ORIGIN[2].x0 + 29);
     for (int y = 7; y <= 16; ++y) {
-      CHECK(canvas[y * 64 + 30] == SENTINEL); // "1000" ends at column 29
-      CHECK(canvas[y * 64 + 31] == SENTINEL); // spare column empty
-      CHECK(canvas[y * 64 + 32] == SENTINEL); // no separator line
+      CHECK(canvas[y * 64 + 31] == SENTINEL); // separation column empty
+      CHECK(canvas[y * 64 + 32] == SENTINEL); // (no separator line either)
     }
     for (int i = 0; i < 64; ++i) {
+      CHECK(canvas[i * 64 + 0] == SENTINEL);  // S12: nothing in column 0
+      CHECK(canvas[i * 64 + 63] == SENTINEL); // S12: equal right margin
+      CHECK(canvas[0 * 64 + i] == SENTINEL);  // S13: nothing in row 0
+      CHECK(canvas[63 * 64 + i] == SENTINEL); // S13: equal bottom margin
       CHECK(canvas[i * 64 + 32] == SENTINEL);
       CHECK(canvas[31 * 64 + i] == SENTINEL);
       CHECK(canvas[i * 64 + 31] == SENTINEL);
     }
+    // The bottom cell's last painted row (33+29 = 62) leaves row 63 dark
+    // with the SAME margin the top margin gives row 0 — the extended
+    // extremes above are the general proof per row/column.
     CHECK(bandHas(canvas, ORIGIN[0], 7, 10, PINNED_COLD)); // -1000 °C
     CHECK(bandHas(canvas, ORIGIN[1], 7, 10, PINNED_HOT));  // +1000 °C
     CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_COLD));
@@ -493,12 +517,12 @@ int main(int argc, char **argv) {
             ORIGIN[3].x0 + 13);
       CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_COLD));
       // Drawn-width icon centring: c0 "-5" (2 glyphs) and c1 "10"
-      // (2 glyphs) both centre the icon at 19; a neighbouring one-glyph
-      // figure would centre at 15 (proven in the icons case).
-      CHECK(slotHasInk(canvas, 0, 19, 26));
-      CHECK(slotHasInk(canvas, 1, 19, 26));
+      // (2 glyphs) both centre the icon at 18 (S12 width); a neighbouring
+      // one-glyph figure would centre at 14 (proven in the icons case).
+      CHECK(slotHasInk(canvas, 0, 18, 25));
+      CHECK(slotHasInk(canvas, 1, 18, 25));
       for (int y = ORIGIN[0].y0 + 14; y < ORIGIN[0].y0 + 22; ++y)
-        for (int x = ORIGIN[0].x0 + 14; x <= ORIGIN[0].x0 + 18; ++x)
+        for (int x = ORIGIN[0].x0 + 14; x <= ORIGIN[0].x0 + 17; ++x)
           CHECK(canvas[y * 64 + x] == SENTINEL); // gap left of the icon
     }
   } else if (test == "values") {
@@ -531,9 +555,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; ++i) {
       CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::MUTED));
       CHECK(bandHas(canvas, ORIGIN[i], 0, 5, PINNED_PROB));
-      CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) == ORIGIN[i].x0 + 30);
-      for (int y = ORIGIN[i].y0 + 22; y < ORIGIN[i].y0 + REGION_SPAN; ++y)
-        for (int x = ORIGIN[i].x0; x < ORIGIN[i].x0 + REGION_SPAN; ++x)
+      CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) == ORIGIN[i].x0 + 29);
+      for (int y = ORIGIN[i].y0 + 22; y < ORIGIN[i].y0 + REGION_H; ++y)
+        for (int x = ORIGIN[i].x0; x < ORIGIN[i].x0 + REGION_W; ++x)
           CHECK(canvas[y * 64 + x] != idle_clock::AMBER);
     }
     // S11: cell 2's -5 prints its sign — the dash glyph occupies scaled
@@ -572,11 +596,11 @@ int main(int argc, char **argv) {
       const uint8_t code[4] = {0, 63, 3, 95};
       CHECK(!render(tmax, tmin, code));
       // Expected icon start offset from the cell origin: figureW = 8d-2,
-      // leftGap = (CELL - figureW - 7)/2, icon = figureW + leftGap.
-      // d=2 -> 19, d=1 -> 15. A one-digit cell (c1) and a two-digit cell
-      // (c0) in the same slot geometry therefore differ, and the mixed
-      // cells (c2, c3) follow the WIDER figure.
-      const int expectedStart[4] = {19, 15, 19, 19};
+      // leftGap = (CELL_W - figureW - 7)/2, icon = figureW + leftGap.
+      // d=2 -> 18, d=1 -> 14 (S12 width). A one-digit cell (c1) and a
+      // two-digit cell (c0) in the same slot geometry therefore differ,
+      // and the mixed cells (c2, c3) follow the WIDER figure.
+      const int expectedStart[4] = {18, 14, 18, 18};
       const int figureW[4] = {14, 6, 14, 14};
       for (int i = 0; i < 4; ++i) {
         const Region &r = ORIGIN[i];
@@ -590,29 +614,30 @@ int main(int argc, char **argv) {
         // The gaps on both sides of the icon: columns between the end of
         // the wider figure and the icon start (left), and between the
         // icon's last column and the cell's last column (right, column
-        // x0+30 included via <= 30). Left gap must equal the right gap,
+        // column x0+29 included via <= 29). Left gap must equal the right gap,
         // allowing exactly the one odd pixel — which goes to the LEFT.
         const int leftGap = expectedStart[i] - figureW[i];
-        const int rightGap = 30 - (expectedStart[i] + 7);
+        const int rightGap = 29 - (expectedStart[i] + 7);
         CHECK(leftGap == rightGap || leftGap == rightGap + 1);
         CHECK(leftGap > 0); // the icon never touches a figure
         for (int y = r.y0 + 14; y < r.y0 + 22; ++y) {
           for (int x = r.x0 + figureW[i]; x < start; ++x)
             CHECK(canvas[y * 64 + x] == SENTINEL); // left gap empty
-          for (int x = start + 8; x <= r.x0 + 30; ++x)
+          for (int x = start + 8; x <= r.x0 + 29; ++x)
             CHECK(canvas[y * 64 + x] == SENTINEL); // right gap empty
         }
-        // The icon never reaches the cell's last column (all four cells
-        // have narrow figures here) and never leaves the cell.
-        CHECK(expectedStart[i] + 7 <= 26);
+        // The icon never reaches the cell's last column (x0+29 since
+        // S12; all four cells have narrow figures here).
+        CHECK(expectedStart[i] + 7 <= 28);
       }
       // Sanity: same slot geometry, different widths, different starts.
       CHECK(expectedStart[0] != expectedStart[1]);
       // The probabilities (neutral muted ink, S10) still end at the
-      // cell's right edge on row 0.
+      // cell's own edge on row 0 — one column inside the canvas edge (S12
+      // moved the right cells' edge from column 63 to 62).
       for (int i = 0; i < 4; ++i)
         CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) ==
-              ORIGIN[i].x0 + 30);
+              ORIGIN[i].x0 + 29);
     }
     { // (b) The three-glyph drop rule still holds, and an unknown WMO
       // code still draws no icon even when both figures fit: c0 drops for
@@ -623,10 +648,10 @@ int main(int argc, char **argv) {
       const int16_t tmin[4] = {120, 1000, 120, 12};
       const uint8_t code[4] = {0, 2, 44, 0};
       CHECK(!render(tmax, tmin, code));
-      CHECK(!slotHasInk(canvas, 0, 22, 30)); // dropped, three-digit max
+      CHECK(!slotHasInk(canvas, 0, 22, 29)); // dropped, three-digit max
       CHECK(rightmostInkInBand(canvas, ORIGIN[0], 7, 10) ==
             ORIGIN[0].x0 + 21); // "100" kept whole
-      CHECK(!slotHasInk(canvas, 1, 22, 30)); // dropped, three-digit min
+      CHECK(!slotHasInk(canvas, 1, 22, 29)); // dropped, three-digit min
       CHECK(rightmostInkInBand(canvas, ORIGIN[1], 19, 10) ==
             ORIGIN[1].x0 + 21); // "100" kept whole
       CHECK(!slotHasInk(canvas, 2, 19, 26)); // unknown code: no icon

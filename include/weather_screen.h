@@ -15,7 +15,10 @@
 // code beside the temperature block, centred at draw time in the free
 // space its wider figure leaves, with every temperature figure coloured
 // by its five-band temperature scale (S10) that carries the sign from
-// -10 downwards (S11). All text is drawn through the same 3x5 glyph
+// -10 downwards (S11). Nothing is ever drawn in the S12 marginal columns
+// 0 and 63 nor in the S13 marginal rows 0 and 63: the content starts one
+// pixel inside the canvas on every border. All text is drawn through the
+// same 3x5 glyph
 // table and text() helper the clock uses; the icons use the same plot
 // discipline with a small row-byte table of their own. Colors leave this
 // renderer raw 565; the pixel callback applies the shared brightness
@@ -23,18 +26,32 @@
 // the whole screen dims with the panel setting. No Arduino/WiFi symbols.
 namespace weather_screen {
 
-// Geometry fixed by the spec (S1): the four cells sit on the canvas with
-// an empty crossing at (32, 32) — S9 removed the two separator lines, so
-// nothing is ever drawn there. Each cell still owns a 31x31 content area
-// anchored at its origin; the empty column 31 and the empty crossing of
-// column 32/row 32 keep every cell clear of its neighbours.
-constexpr int CELL = 31;
+// Geometry fixed by the spec (S1), with the S12 margins: the four cells
+// sit on the canvas with an empty crossing at (32, 32) — S9 removed the
+// two separator lines, so nothing is ever drawn there. S12 leaves the
+// marginal columns 0 and 63 dark, symmetrically: the left-hand cells
+// begin one column in (LEFT_X = 1), and each cell's useful WIDTH shrinks
+// one pixel to 30 px, so a right cell keeps x0 = 33 but ends at column
+// 62 — its right-aligned probability moves its edge in by one and the
+// right border keeps the same margin as the left. Simply shifting
+// everything and clipping the overflow was rejected: it would eat the
+// last column of the right-hand cells. S13 does the same VERTICALLY
+// ("deja otro px por arriba que abajo tenemos sitio"): row 0 stays dark,
+// the cells' useful HEIGHT shrinks one row to 30 rows, and the bottom
+// cells end at row 62, so the bottom border keeps the same margin as the
+// top — again shift-and-clip was rejected for the same reason. The empty
+// columns 31/32 and the empty rows 31/32 still separate the halves.
+constexpr int CELL_W = 30;   // useful WIDTH of a cell (S12)
+constexpr int CELL_H = 30;   // useful HEIGHT of a cell (S13)
+constexpr int LEFT_X = 1;    // x0 of the two left-hand cells (S12)
+constexpr int TOP_Y = 1;     // y0 of the two top cells (S13)
 constexpr int RIGHT_X = 33;  // left edge of the two right-hand cells
 constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
 
 // Row offsets inside a cell (S7): label y+0 (scale 1) with the probability
 // right-aligned on that same row (the '%' ends at the cell's own edge,
-// column x0+30); maximum y+7 and minimum y+19, both at scale 2. The icon
+// column x0+29 — S12: one column inside the canvas edge); maximum y+7
+// and minimum y+19, both at scale 2. The icon
 // (S8/S9) is CENTRED AT DRAW TIME between the end of the wider of the two
 // figures actually drawn and the cell's own right edge, over the vertical
 // middle rows y0+14..y0+21 — never a fixed column, so it leans neither to
@@ -121,16 +138,18 @@ constexpr uint16_t ICON_INK[int(weather::Icon::Unknown)] = {
     idle_clock::AMBER, // storm
 };
 
-// Truncation rule (T2 decision): a value that would not fit its 31 px cell
-// loses WHOLE trailing characters (never a mid-glyph cut) until it fits,
-// e.g. a maximum of -100.0 at scale 2 renders as "-100". Combined with the
-// per-cell region clamp below, nothing a cell draws can ever overwrite the
-// neighbouring cell or touch a divider. Word width for n glyphs at scale s
-// is 4*n*s - s (advance 4*s per character, the last glyph is 3*s wide).
+// Truncation rule (T2 decision): a value that would not fit its 30 px
+// cell (S12) loses WHOLE trailing characters (never a mid-glyph cut)
+// until it fits, e.g. a maximum of ±1000.0 at scale 2 renders as four
+// digit glyphs and fills the narrowed cell exactly. Combined with the
+// per-cell region clamp below, nothing a cell draws can ever overwrite
+// the neighbouring cell or touch a separator strip. Word width for n
+// glyphs at scale s is 4*n*s - s (advance 4*s per character, the last
+// glyph is 3*s wide).
 namespace detail {
 inline size_t fitLength(const char *value, int scale) {
   size_t n = std::strlen(value);
-  while (n > 1 && 4 * static_cast<int>(n) * scale - scale > CELL) --n;
+  while (n > 1 && 4 * static_cast<int>(n) * scale - scale > CELL_W) --n;
   return n;
 }
 
@@ -145,11 +164,11 @@ inline int probabilityWidth(int digits) {
 template<class Pixel>
 void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
               weather::Unit shown, const std::tm &calendar, Pixel pixel) {
-  // The cell's own viewport: any glyph pixel outside the 31x31 region is
+  // The cell's own viewport: any glyph pixel outside the 30x30 region is
   // dropped, so overflowing text is visibly truncated at the cell edge and
-  // never crosses into the neighbour or over a divider.
+  // never crosses into the neighbour or over a separator strip.
   auto plot = [&](int x, int y, uint16_t color) {
-    if (x >= x0 && x < x0 + CELL && y >= y0 && y < y0 + CELL)
+    if (x >= x0 && x < x0 + CELL_W && y >= y0 && y < y0 + CELL_H)
       pixel(x, y, color);
   };
   char buffer[12];
@@ -165,13 +184,14 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
   put(weather::dayLabel(index, calendar.tm_wday), DY_LABEL, SCALE_LABEL,
       INK_LABEL);
   // S7: the probability shares the label row, right-aligned to the cell's
-  // own right edge — the '%' ends at column x0+30. Zero-padded two digits
+  // own right edge — the '%' ends at column x0+29, one column inside the
+  // canvas edge since S12. Zero-padded two digits
   // (100 keeps three); with probability <= 100 the field is at most "100%"
   // (15 px), never truncated.
   std::snprintf(buffer, sizeof buffer, "%02u",
                 static_cast<unsigned>(forecast.prob[index]));
   const int digits = static_cast<int>(std::strlen(buffer));
-  const int left = x0 + CELL - detail::probabilityWidth(digits);
+  const int left = x0 + CELL_W - detail::probabilityWidth(digits);
   idle_clock::text(buffer, left, y0 + DY_LABEL, SCALE_LABEL, INK_PROB, plot);
   const int px = left + 4 * digits;
   for (int row = 0; row < 5; ++row)
@@ -202,11 +222,13 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
   // scale-2 figure of n signless digits is 8n-2 px wide, so with d = the
   // larger drawn digit count:
   //   figureEnd = 8d - 2 (last column of that figure),
-  //   leftGap   = (CELL - figureEnd - 7) / 2  (the odd pixel of an odd
+  //   leftGap   = (CELL_W - figureEnd - 7) / 2  (the odd pixel of an odd
   //               gap goes to the LEFT: the icon leans one pixel towards
-  //               the cell's own right edge),
-  //   iconX     = x0 + figureEnd + leftGap  (== x0 + 11 + 4d).
-  // d=1 -> icon at x0+15; d=2 -> icon at x0+19; the two figures can drop
+  //               the cell's own right edge; with the S12 width of 30 the
+  //               two gap halves come out even for every drawable d, so
+  //               the tie-break no longer fires but stays documented),
+  //   iconX     = x0 + figureEnd + leftGap  (== x0 + 10 + 4d).
+  // d=1 -> icon at x0+14; d=2 -> icon at x0+18; the two figures can drop
   // the icon below: at scale 2 any figure wider than two signless digits
   // (any three-digit magnitude) leaves fewer than two clear columns, so
   // in that cell the icon is omitted and the FULL number is kept — a
@@ -217,7 +239,7 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
   if (maxChars <= 2 && minChars <= 2 && icon != weather::Icon::Unknown) {
     const size_t widest = maxChars > minChars ? maxChars : minChars;
     const int figureEnd = 8 * static_cast<int>(widest) - 2;
-    const int iconX = x0 + figureEnd + (CELL - figureEnd - 7) / 2;
+    const int iconX = x0 + figureEnd + (CELL_W - figureEnd - 7) / 2;
     const int which = static_cast<int>(icon);
     for (int row = 0; row < 8; ++row)
       for (int col = 0; col < 8; ++col)
@@ -231,13 +253,14 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
 // nothing at all: the caller shows the clock instead until a forecast
 // exists, so a board without internet never flickers to an empty grid.
 // S9: no separator lines — the four cells keep the whole canvas to
-// themselves, separated by whitespace only.
+// themselves, separated by whitespace only, and (S12) the marginal
+// columns 0 and 63 stay dark, symmetrically.
 template<class Pixel>
 void draw(const weather::Forecast &forecast, weather::Unit shown,
           const std::tm &calendar, Pixel pixel) {
   if (!forecast.valid) return;
-  const int ORIGIN[4][2] = {{0, 0}, {RIGHT_X, 0}, {0, BOTTOM_Y},
-                            {RIGHT_X, BOTTOM_Y}};
+  const int ORIGIN[4][2] = {{LEFT_X, TOP_Y}, {RIGHT_X, TOP_Y},
+                            {LEFT_X, BOTTOM_Y}, {RIGHT_X, BOTTOM_Y}};
   for (size_t index = 0; index < 4; ++index)
     drawCell(ORIGIN[index][0], ORIGIN[index][1], index, forecast, shown,
              calendar, pixel);
