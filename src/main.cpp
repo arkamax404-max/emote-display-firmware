@@ -22,6 +22,7 @@
 #include "rgb_order.h"
 #include "panel_settings.h"
 #include "wifi_credentials_reset.h"
+#include "wifi_connect_banner.h"
 #include "weather.h"
 #include "weather_screen.h"
 #include "weather_fetch.h"
@@ -482,6 +483,14 @@ static void pollCredentialsReset() {
 }
 
 static WifiInfoOverlay wifiInfo;
+// S12 connect banner (T18): the host-tested state machine behind the
+// three-second IP announcement; see the S12 block in pollWifi()/
+// renderContent()/stagePng() below.
+static wifi_banner::ConnectBanner connectBanner;
+// The READY / SEND PNG hint of the first connection waits until AFTER the
+// IP banner ends (S12: nothing else is flashed before the three seconds),
+// and stays silent if a frame was staged during the window.
+static bool readyPending = false;
 static SenderStats senderStats;
 static SenderConnection senderConnection;
 static uint32_t senderIp = 0;
@@ -534,6 +543,16 @@ static void renderContent() {
       matrix.setCursor(2, panel::TOP_OFFSET + row * 8);
       matrix.print(lines[row].c_str());
     }
+    return;
+  }
+  // S12 connect banner: shown over the panel for three seconds after the
+  // connection is established; the two-row split, text style and shared
+  // brightness scaling all live in wifi_banner::draw (header helper, same
+  // pattern as firmware_version/weather_screen). The UP-button overlay
+  // keeps its priority, and the branch sits in front of the clock, the
+  // weather alternation and the PNG path, all of which are untouched.
+  if (connectBanner.active(millis())) {
+    wifi_banner::draw(matrix, connectBanner.address());
     return;
   }
   if (source == idle_clock::Source::Clock) {
@@ -983,6 +1002,11 @@ static bool stagePng(uint8_t *data, size_t length, bool clockSkin) {
   const bool decoded = frameDecoder.decode(data, length);
   clockState.pngResult(decoded, millis());
   if (!decoded) return false;
+  // S12: an incoming PNG outranks the diagnostic banner — content wins —
+  // so an accepted frame during the window closes it for good (both
+  // ingress paths stage through here) and the present this call leads to
+  // shows the frame, not the address.
+  connectBanner.close();
   memcpy(lastFrame, frameDecoder.pixels(), sizeof(lastFrame));
   frameIsClock = clockSkin;
   hasFrame = true;
@@ -1631,6 +1655,26 @@ static void pollWifi() {
   // station server is never begun in the same window.
   if (portalActive) return;
   if (ssid.isEmpty()) return;
+  // S12: one connectivity check per loop drives the three-second IP
+  // banner. The window opens on the disconnected -> connected transition
+  // only (a repeated WL_CONNECTED poll never retriggers it), the live
+  // address is captured straight from WiFi.localIP() at that moment, and
+  // the expiry — or a loss or a staged PNG closing it — returns the panel
+  // to whatever it was showing. The READY / SEND PNG hint that the first
+  // connection used to flash at once now waits until AFTER the banner.
+  const uint32_t now = millis();
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  const bool bannerWasActive = connectBanner.active(now);
+  if (connectBanner.update(connected, now)) {
+    connectBanner.capture(WiFi.localIP().toString().c_str());
+    presentDisplay();
+  } else if (bannerWasActive && !connectBanner.active(now)) {
+    presentDisplay();
+    if (readyPending && !hasFrame) {
+      readyPending = false;
+      displayMessage("READY", "SEND PNG");
+    }
+  }
   if (WiFi.status() != WL_CONNECTED) {
     if (listening) { closeRequest(); server.end(); MDNS.end(); listening = false; }
     if (bootPhase) {
@@ -1673,7 +1717,7 @@ static void pollWifi() {
     Serial.print("Receiver ready: http://");
     Serial.print(WiFi.localIP());
     Serial.println("/emote (also gentle-matrix.local)");
-    if (accepted == 0) displayMessage("READY", "SEND PNG");
+    if (accepted == 0) readyPending = true; // shown when the IP banner ends (S12)
   }
   pollHttp();
 }
