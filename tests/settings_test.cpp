@@ -62,6 +62,12 @@
 //                     Defaults offered: 40416775 / -3703790 / Madrid.
 //   seconds <hex>     reviewSeconds → "seconds <error|ok <n>>"
 //   unitsrev <hex>    reviewUnits → "unitsrev <error|ok <C|F>>"
+//   onrev <hex>       reviewWeatherOn (S14) → "onrev <error|ok <on|off>>"
+//                     exactly "on"/"off" are accepted, anything else is
+//                     rejected, not coerced
+//   odef <n>          the stored weather-switch fallback loader →
+//                     "odef <on|off>" (0 = off, 1 = on; absent and
+//                     invalid bytes fall back to the default on)
 //   csdef <n> | wsdef <n> | udef <n>
 //                     the stored-value fallback loaders → their resolved
 //                     values (udef <C|F>)
@@ -69,6 +75,20 @@
 //                     storedCityOrDefault → "citydef ok lat=<n> lon=<n>
 //                     name=<v>" (always a usable record: the default city
 //                     whenever the stored state is incomplete/absent)
+//   storea <present> <fail> [<p> <c> <o> <s> <w> <u>] [<n>]
+//                     storeAllSettings (the combined POST /config
+//                     transaction, now SEVEN keys) over the fake mixed
+//                     store (kind 2) → "storea <ok|fail> b=<n|-> c=<n|->
+//                     o=<n|-> s=<n|-> w=<n|-> u=<n|-> n=<n|->". <present>
+//                     bits 0..6 seed brightness=30 / clockformat=0 (H24) /
+//                     rgborder=5 (BGR) / clocksecs=20 / weathersecs=10 /
+//                     units=0 (Celsius) / weatheron=1 (on). The same
+//                     fail-bit scheme per transaction key b/c/o/s/w/u/n
+//                     (k = 0..6); the removal bits sit at 28+k because a
+//                     seven-key transaction's key bits would collide with
+//                     the old 12+k offsets, so <fail> is read as a 64-bit
+//                     word for this command. Defaults offered: 80 / 1 (H12)
+//                     / 0 (RGB) / 60 / 30 / 1 (F) / on.
 //   cityform <hex>    parseCityForm → "cityform <error|ok city=<v>>"
 //   citysearch <hex>  reviewCitySearch → "citysearch <error|ready>" (the
 //                     rejection that happens BEFORE any request could run)
@@ -76,8 +96,12 @@
 //                     cityFromResponse → "cityfrom <error|ok lat=<n>
 //                     lon=<n> name=<v>"; a negative status fakes a
 //                     transport-level error (ok=false)
-//   pagew <p> <24h|12h> <order> <C|F> <clocksecs> <weathersecs> <citynamehex> <errhex>
-//                     the extended configPage → "pagew <escaped html>"
+//   pagew <p> <24h|12h> <order> <C|F> <clocksecs> <weathersecs> <citynamehex> [<on|off>] <errhex>
+//                     the extended configPage → "pagew <escaped html>";
+//                     the optional eighth argument is the S14 weather
+//                     switch preselection (default on) — with eight
+//                     tokens the eighth is the error (the legacy form),
+//                     with nine the eighth must be on/off.
 #include "display_settings.h"
 #include "rgb_order.h"
 #include "panel_settings.h"
@@ -167,12 +191,22 @@ class FakeSettingsStore : public panel_settings::SettingsStore {
 // bit 0. Removal is type-agnostic, exactly like Preferences::remove.
 class FakeMixedStore : public panel_settings::SettingsStore {
  public:
-  FakeMixedStore(int kind, unsigned present, unsigned fail)
+  FakeMixedStore(int kind, unsigned present, unsigned long long fail)
       : kind_(kind), fail_(fail) {
     if (kind_ == 0) {
       if (present & 1u) bytes_["clocksecs"] = 20;
       if (present & 2u) bytes_["weathersecs"] = 10;
       if (present & 4u) bytes_["units"] = 0;
+    } else if (kind_ == 2) {
+      // The combined POST /config transaction: the panel triple plus the
+      // whole weather set, including the S14 switch.
+      if (present & 1u) bytes_["brightness"] = panel::BRIGHTNESS_DEFAULT_PERCENT;
+      if (present & 2u) bytes_["clockformat"] = 0;   // 0 = H24, a valid code
+      if (present & 4u) bytes_["rgborder"] = 5;      // 5 = BGR, a snapshot
+      if (present & 8u) bytes_["clocksecs"] = 20;
+      if (present & 16u) bytes_["weathersecs"] = 10;
+      if (present & 32u) bytes_["units"] = 0;        // 0 = Celsius
+      if (present & 64u) bytes_["weatheron"] = 1;    // 1 = on
     } else {
       if (present & 1u) ints_["citylat"] = 37382830;
       if (present & 2u) ints_["citylon"] = -5973170;
@@ -219,14 +253,28 @@ class FakeMixedStore : public panel_settings::SettingsStore {
     strings_[key] = lie_(k, rollback) ? value + "X" : value;
   }
   void removeUChar(const char *key) override {
-    if (fail_ & (1u << (12u + keyIndex_(key)))) return;
+    // Kind 2 shifts the removal bits to 28+k: the commit/lie/rollback/lie
+    // bits of a SEVEN-key transaction would collide with the old 12+k
+    // offsets (key 3 owns bits 12..15). Kinds 0/1 keep the old offsets,
+    // exactly as their documented scheme says.
+    const unsigned removalOffset = kind_ == 2 ? 28u : 12u;
+    if (fail_ & (1ULL << (removalOffset + keyIndex_(key)))) return;
     bytes_.erase(key);
     ints_.erase(key);
     strings_.erase(key);
   }
 
  private:
-  static unsigned keyIndex_(const char *key) {
+  unsigned keyIndex_(const char *key) const {
+    if (kind_ == 2) {
+      return std::strcmp(key, "brightness") == 0 ? 0u
+          : std::strcmp(key, "clockformat") == 0 ? 1u
+          : std::strcmp(key, "rgborder") == 0    ? 2u
+          : std::strcmp(key, "clocksecs") == 0   ? 3u
+          : std::strcmp(key, "weathersecs") == 0 ? 4u
+          : std::strcmp(key, "units") == 0       ? 5u
+          : 6u;                                              // weatheron
+    }
     return std::strcmp(key, "clocksecs") == 0 ||
                    std::strcmp(key, "citylat") == 0
                ? 0u
@@ -236,17 +284,19 @@ class FakeMixedStore : public panel_settings::SettingsStore {
                : 2u; // units / cityname
   }
   bool storeNothing_(int k, bool rollback) const {
-    return (fail_ & (1u << (4u * k + (rollback ? 2u : 0u)))) != 0;
+    return (fail_ & (1ULL << (4u * k + (rollback ? 2u : 0u)))) != 0;
   }
   bool lie_(int k, bool rollback) const {
-    return (fail_ & (1u << (4u * k + (rollback ? 3u : 1u)))) != 0;
+    return (fail_ & (1ULL << (4u * k + (rollback ? 3u : 1u)))) != 0;
   }
   int kind_;
   std::map<std::string, uint8_t> bytes_;
   std::map<std::string, int32_t> ints_;
   std::map<std::string, std::string> strings_;
   std::map<std::string, unsigned> writes_;
-  unsigned fail_;
+  // 64-bit so the kind-2 (storea) removal bits at 28+k can reach 34 for
+  // the seventh key; kinds 0/1 keep their documented 32-bit semantics.
+  unsigned long long fail_;
 };
 } // namespace
 
@@ -330,7 +380,8 @@ int main() {
                      << " c=" << fields.clock << " o=" << fields.order
                      << " s=" << fields.clocksecs
                      << " w=" << fields.weathersecs
-                     << " u=" << fields.units << '\n';
+                     << " u=" << fields.units
+                     << " n=" << fields.weatheron << '\n';
     } else if (cmd == "route") {
       std::string hex;
       args >> hex;
@@ -426,6 +477,16 @@ int main() {
                   << '\n';
       else
         std::cout << "unitsrev error\n";
+    } else if (cmd == "onrev") {
+      std::string hex;
+      args >> hex;
+      const panel_settings::WeatherOnChoice choice =
+          panel_settings::reviewWeatherOn(unhex(hex));
+      if (choice.ok)
+        std::cout << "onrev ok " << panel_settings::weatherOnName(choice.on)
+                  << '\n';
+      else
+        std::cout << "onrev error\n";
     } else if (cmd == "csdef") {
       unsigned stored = 0;
       args >> stored;
@@ -446,6 +507,15 @@ int main() {
       const weather::Unit unit = panel_settings::unitOrDefault(
           static_cast<uint8_t>(stored));
       std::cout << "udef " << (unit == weather::Unit::Fahrenheit ? "F" : "C")
+                << '\n';
+    } else if (cmd == "odef") {
+      unsigned stored = 0;
+      if (!(args >> stored)) stored = 255; // an absent key reads as 255
+      std::cout << "odef "
+                << (panel_settings::weatherOnOrDefault(
+                        static_cast<uint8_t>(stored))
+                        ? "on"
+                        : "off")
                 << '\n';
     } else if (cmd == "citydef") {
       unsigned present = 0;
@@ -540,17 +610,72 @@ int main() {
                 << " lat=" << (hasLat ? std::to_string(storedLat) : "-")
                 << " lon=" << (hasLon ? std::to_string(storedLon) : "-")
                 << " name=" << (hasName ? escape(storedName) : "-") << '\n';
+    } else if (cmd == "storea") {
+      unsigned present = 0;
+      unsigned long long fail = 0;
+      unsigned percent = 80, clockCode = 1, orderCode = 0;
+      unsigned secs = 60, weather = 30, unitCode = 1, onCode = 1;
+      args >> present >> fail;
+      if (args >> percent) {
+        if (!(args >> clockCode)) clockCode = 1;
+        if (!(args >> orderCode)) orderCode = 0;
+        if (args >> secs) {
+          if (!(args >> weather)) weather = 30;
+          if (args >> unitCode) {
+            if (!(args >> onCode)) onCode = 1;
+          }
+        }
+      }
+      FakeMixedStore store(2, present, fail);
+      const idle_clock::ClockFormat format = clockCode == 1
+          ? idle_clock::ClockFormat::H12 : idle_clock::ClockFormat::H24;
+      rgb_order::Order order = rgb_order::Order::RGB;
+      if (!rgb_order::orderFromCode(static_cast<uint8_t>(orderCode & 7u), order))
+        order = rgb_order::Order::RGB;
+      weather::Unit unit = weather::Unit::Celsius;
+      if (!weather::unitFromCode(static_cast<uint8_t>(unitCode), unit))
+        unit = weather::Unit::Celsius;
+      const bool ok = panel_settings::storeAllSettings(
+          store, static_cast<uint8_t>(percent), format, order,
+          static_cast<uint8_t>(secs), static_cast<uint8_t>(weather), unit,
+          onCode != 0);
+      uint8_t b = 0, c = 0, o = 0, s = 0, w = 0, u = 0, n = 0;
+      const bool hasB = store.readUChar("brightness", b);
+      const bool hasC = store.readUChar("clockformat", c);
+      const bool hasO = store.readUChar("rgborder", o);
+      const bool hasS = store.readUChar("clocksecs", s);
+      const bool hasW = store.readUChar("weathersecs", w);
+      const bool hasU = store.readUChar("units", u);
+      const bool hasN = store.readUChar("weatheron", n);
+      std::cout << "storea " << (ok ? "ok" : "fail")
+                << " b=" << (hasB ? std::to_string(b) : "-")
+                << " c=" << (hasC ? std::to_string(c) : "-")
+                << " o=" << (hasO ? std::to_string(o) : "-")
+                << " s=" << (hasS ? std::to_string(s) : "-")
+                << " w=" << (hasW ? std::to_string(w) : "-")
+                << " u=" << (hasU ? std::to_string(u) : "-")
+                << " n=" << (hasN ? std::to_string(n) : "-") << '\n';
     } else if (cmd == "pagew") {
       unsigned percent = 0, clockSecs = 20, weatherSecs = 10;
       std::string formatHex, orderHex, unitHex, cityHex, errorHex;
       args >> percent >> formatHex >> orderHex >> unitHex;
+      bool weatherOnArg = true;
       if (!(args >> clockSecs)) clockSecs = 20;
       else {
         if (!(args >> weatherSecs)) weatherSecs = 10;
         else {
           if (!(args >> cityHex)) cityHex = "-";
           else {
-            if (!(args >> errorHex)) errorHex = "-";
+            // The optional eighth argument: "on"/"off" selects the S14
+            // switch preselection (then only the error remains); anything
+            // else is the error of the legacy eight-argument form.
+            std::string token;
+            if (args >> token && (token == "on" || token == "off")) {
+              weatherOnArg = token == "on";
+              if (!(args >> errorHex)) errorHex = "-";
+            } else if (!token.empty()) {
+              errorHex = token;
+            }
           }
         }
       }
@@ -565,8 +690,8 @@ int main() {
                 << escape(panel_settings::configPage(
                        static_cast<uint8_t>(percent), format, order, unit,
                        static_cast<uint8_t>(clockSecs),
-                       static_cast<uint8_t>(weatherSecs), unhex(cityHex),
-                       unhex(errorHex)))
+                       static_cast<uint8_t>(weatherSecs), weatherOnArg,
+                       unhex(cityHex), unhex(errorHex)))
                 << '\n';
     }
   }

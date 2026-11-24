@@ -97,44 +97,60 @@ class SettingsTests(unittest.TestCase):
                          ["setb ok p=30 s=76", "color 4800"])
 
     # --- POST /config form parsing and value review --------------------------
-    # T4a: the form now requires exactly six keys — the original three plus
+    # T4a: the form originally required six keys — the original three plus
     # the clock duration, the weather duration and the temperature unit.
+    # S14: a seventh, the weather switch `weatheron` ("on"/"off").
 
-    def test_form_parses_all_six_required_keys(self):
+    def test_form_parses_all_seven_required_keys(self):
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=45&clock=12h&order=GRB&clocksecs=20&weathersecs=10&units=C")]),
-            ["form ok b=45 c=12h o=GRB s=20 w=10 u=C"])
+            "brightness=45&clock=12h&order=GRB&clocksecs=20&weathersecs=10"
+            "&units=C&weatheron=on")]),
+            ["form ok b=45 c=12h o=GRB s=20 w=10 u=C n=on"])
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=80&clock=24h&order=rgb&clocksecs=120&weathersecs=5&units=F")]),
-            ["form ok b=80 c=24h o=rgb s=120 w=5 u=F"])
+            "brightness=80&clock=24h&order=rgb&clocksecs=120&weathersecs=5"
+            "&units=F&weatheron=off")]),
+            ["form ok b=80 c=24h o=rgb s=120 w=5 u=F n=off"])
 
     def test_form_url_rules_mirroring_the_portal(self):
         # %XX decoding for the keys; '+' is a space; bare spaces and control
         # bytes are rejected, not coerced.
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=%34%35&clock=12h&order=BRG&clocksecs=10&weathersecs=5&units=F")]),
-            ["form ok b=45 c=12h o=BRG s=10 w=5 u=F"])
+            "brightness=%34%35&clock=12h&order=BRG&clocksecs=10&weathersecs=5"
+            "&units=F&weatheron=on")]),
+            ["form ok b=45 c=12h o=BRG s=10 w=5 u=F n=on"])
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=+10&clock=12h&order=RGB&clocksecs=10&weathersecs=5&units=C")]),
-            ["form ok b= 10 c=12h o=RGB s=10 w=5 u=C"])  # '+' -> space, review rejects below
+            "brightness=+10&clock=12h&order=RGB&clocksecs=10&weathersecs=5"
+            "&units=C&weatheron=off")]),
+            ["form ok b= 10 c=12h o=RGB s=10 w=5 u=C n=off"])  # '+' -> space, review rejects below
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=1 0&clock=12h&order=RGB&clocksecs=10&weathersecs=5&units=C")]),
+            "brightness=1 0&clock=12h&order=RGB&clocksecs=10&weathersecs=5"
+            "&units=C&weatheron=on")]),
             ["form error"])
         self.assertEqual(self.run_script(["form " + feed(
-            "brightness=10&clock=12%68&order=BGR&clocksecs=10&weathersecs=5&units=C")]),
-            ["form ok b=10 c=12h o=BGR s=10 w=5 u=C"])
+            "brightness=10&clock=12%68&order=BGR&clocksecs=10&weathersecs=5"
+            "&units=C&weatheron=on")]),
+            ["form ok b=10 c=12h o=BGR s=10 w=5 u=C n=on"])
+        # An empty or unreviewable weather-switch VALUE still parses; the
+        # per-value review rejects it with its reason below.
+        self.assertEqual(self.run_script(["form " + feed(
+            "brightness=45&clock=12h&order=RGB&clocksecs=20&weathersecs=10"
+            "&units=C&weatheron=")]),
+            ["form ok b=45 c=12h o=RGB s=20 w=10 u=C n="])
 
     def test_form_rejects_missing_unknown_and_duplicate_keys(self):
-        complete = "brightness=45&clock=12h&order=RGB&clocksecs=20&weathersecs=10&units=C"
+        complete = ("brightness=45&clock=12h&order=RGB&clocksecs=20"
+                    "&weathersecs=10&units=C&weatheron=on")
         pairs = [complete.replace("brightness=45&", ""),           # missing brightness
                  complete.replace("clock=12h&", ""),               # missing clock
                  complete.replace("order=RGB&", ""),               # missing order
                  complete.replace("clocksecs=20&", ""),            # missing clocksecs
                  complete.replace("weathersecs=10&", ""),          # missing weathersecs
                  complete.replace("&units=C", ""),                 # missing units
+                 complete.replace("&weatheron=on", ""),            # missing weatheron
                  complete.replace("clocksecs=20", "clocksecs=20&extra=1"),
                  complete.replace("order=RGB", "order=RGB&order=RBG"),
                  complete.replace("units=C", "units=C&units=F"),
+                 complete.replace("weatheron=on", "weatheron=on&weatheron=off"),
                  complete.replace("brightness=45", "brightness45=45"),
                  complete.replace("clocksecs=20", "clocksecs=20&clocksecs=30")]
         for body in pairs + ["", "brightness"]:
@@ -536,6 +552,7 @@ class ConfigWiringTests(unittest.TestCase):
         pre = body.split("if (storePanelSettings", 1)[0]
         self.assertNotIn("panel::setBrightnessPercent(", pre)
         self.assertNotIn("clockFormat =", pre)
+        self.assertNotIn("weatherOn =", pre)
         # The board only ever restarts for an ACTUAL change of the channel
         # order; a rejected value, a malformed body or an unverified store
         # must not even reach the store.
@@ -545,15 +562,21 @@ class ConfigWiringTests(unittest.TestCase):
         applied = body.split(
             "if (storePanelSettings(brightness.percent, clock.format, order.value,\n"
             "                         clockDuration.seconds, weatherDuration.seconds,\n"
-            "                         unit.unit)) {",
+            "                         unit.unit, weatherSwitch.on)) {",
             1)[1]
         applied = applied[:applied.index("\n  }")]
         for wired in ("panel::setBrightnessPercent(",
                       "clockFormat = clock.format;", "presentDisplay();",
                       "clockSecs = clockDuration.seconds;",
                       "weatherSecs = weatherDuration.seconds;",
-                      "weatherUnit = unit.unit;"):
+                      "weatherUnit = unit.unit;",
+                      "weatherOn = weatherSwitch.on;"):
             self.assertIn(wired, applied)
+        # S14: switching back on with a missing or stale forecast books an
+        # immediate attempt — a fresh scheduler fetches on the very first
+        # tick — while a still-fresh forecast keeps the 30-minute cadence.
+        self.assertIn("weather_fetch::Scheduler", applied)
+        self.assertIn("weatherScheduler.stale(millis())", applied)
         # Restart only when the order value actually changed: the driver
         # fixes the pins at construction, so the board reboots to apply it —
         # and never otherwise.
@@ -701,6 +724,18 @@ class WeatherSettingsTests(SettingsTests):
             with self.subTest(value=value):
                 self.assertEqual(self.run_script(["unitsrev " + feed(value)]), [out])
 
+    # --- S14: the weather switch review — exactly "on" and "off" -------------
+
+    def test_weather_switch_review_accepts_exactly_on_and_off(self):
+        for value, out in (("on", "onrev ok on"), ("off", "onrev ok off"),
+                           ("On", "onrev error"), ("OFF", "onrev error"),
+                           ("1", "onrev error"), ("0", "onrev error"),
+                           ("", "onrev error"), ("no", "onrev error"),
+                           (" on", "onrev error"), ("on ", "onrev error"),
+                           ("true", "onrev error")):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_script(["onrev " + feed(value)]), [out])
+
     # --- stored values outside their sets fall back to the defaults ----------
 
     def test_stored_durations_fall_back_to_their_defaults(self):
@@ -719,6 +754,16 @@ class WeatherSettingsTests(SettingsTests):
         self.assertEqual(self.run_script(["udef 0", "udef 1", "udef 2",
                                           "udef 42", "udef 255"]),
                          ["udef C", "udef F", "udef C", "udef C", "udef C"])
+
+    def test_stored_weather_switch_falls_back_to_on(self):
+        # S14: the stored byte is 0 = off and 1 = on; an absent key (the
+        # 255 sentinel the loaders read) and every invalid byte fall back
+        # to the documented default, on.
+        self.assertEqual(self.run_script(["odef 0", "odef 1", "odef 2",
+                                          "odef 42", "odef 200",
+                                          "odef 255"]),
+                         ["odef off", "odef on", "odef on", "odef on",
+                          "odef on", "odef on"])
 
     def test_stored_city_falls_back_to_sevilla(self):
         # Nothing stored: the S6 default city, so a fresh board has a city.
@@ -779,6 +824,61 @@ class WeatherSettingsTests(SettingsTests):
         # The same discipline with the clock commit itself failing (bit 0):
         # every rollback write still runs, including the lying one.
         self.assertEqual(self.run_storew(7, 25), "storew fail s=21 w=10 u=0")
+
+    # --- the combined seven-key transaction (S14 joins POST /config) ---------
+
+    def run_storea(self, present, fail, percent=80, clock=1, order=0,
+                   secs=60, weather=30, unit=1, on=1):
+        return self.run_script(
+            [f"storea {present} {fail} {percent} {clock} {order} {secs} "
+             f"{weather} {unit} {on}"])[0]
+
+    def test_storea_success_persists_all_seven_values(self):
+        self.assertEqual(self.run_storea(127, 0),
+                         "storea ok b=80 c=1 o=0 s=60 w=30 u=1 n=1")
+        # A fresh namespace round-trips every key, including zero codes
+        # (H24, RGB, Celsius, off) that must never read as failures.
+        self.assertEqual(self.run_storea(0, 0, 25, 0, 0, 5, 120, 0, 0),
+                         "storea ok b=25 c=0 o=0 s=5 w=120 u=0 n=0")
+        # Offered "off" round-trips as the stored 0 next to the other keys.
+        self.assertEqual(self.run_storea(127, 0, 80, 1, 3, 60, 30, 1, 0),
+                         "storea ok b=80 c=1 o=3 s=60 w=30 u=1 n=0")
+
+    def test_storea_failed_commit_restores_the_exact_previous_seven(self):
+        # The weathersecs commit cannot be persisted (key w = k4, bit 16):
+        # read-back decides, the rollback restores ALL seven keys, and the
+        # call reports failure with the exact snapshot (off was never stored,
+        # weatheron stays 1).
+        self.assertEqual(self.run_storea(127, 1 << 16),
+                         "storea fail b=30 c=0 o=5 s=20 w=10 u=0 n=1")
+        # The switch key itself failing commit (key n = k6, bit 24); the
+        # offered switch is OFF so the committed byte would differ from the
+        # stored 1 — read-back decides.
+        self.assertEqual(self.run_storea(127, 1 << 24, on=0),
+                         "storea fail b=30 c=0 o=5 s=20 w=10 u=0 n=1")
+        # A lying switch commit (bit 25), again offering the other value.
+        self.assertEqual(self.run_storea(127, 1 << 25, on=0),
+                         "storea fail b=30 c=0 o=5 s=20 w=10 u=0 n=1")
+
+    def test_storea_rollback_removal_and_unverified_outcomes(self):
+        # Nothing stored before; the units commit fails (key u = k5, bit 20);
+        # the rollback must leave the namespace empty — absence fidelity for
+        # every key including the freshly created switch.
+        self.assertEqual(self.run_storea(0, 1 << 20),
+                         "storea fail b=- c=- o=- s=- w=- u=- n=-")
+        # A removal that does not take effect on the freshly written switch
+        # (removal n bit 34, next to the weathersecs commit failure bit 16):
+        # the offered switch stays visible and the outcome stays unverified;
+        # weathersecs was never persisted, so it reads absent.
+        self.assertEqual(self.run_storea(0, (1 << 16) | (1 << 34)),
+                         "storea fail b=- c=- o=- s=- w=- u=- n=1")
+        # A lying restore of the switch (bit 27) alongside the clocksecs
+        # commit failure (bit 12): every restore still runs — clocksecs
+        # lands exactly on its snapshot (20, it was never changed) while
+        # the lying switch byte stays visible and the transaction reports
+        # failure, never success.
+        self.assertEqual(self.run_storea(127, (1 << 12) | (1 << 27)),
+                         "storea fail b=30 c=0 o=5 s=20 w=10 u=0 n=0")
 
     # --- the city transaction over the typed keys -----------------------------
 
@@ -864,6 +964,36 @@ class WeatherSettingsTests(SettingsTests):
         out = self.run_script(["pagew 80 24h RGB C 20 10 " + feed("madrid")
                                + " " + feed("<e>")])[0]
         self.assertIn("&lt;e&gt;", out)
+
+    # --- S14: the weather switch on the page ----------------------------------
+
+    def test_page_carries_the_weather_switch_preselected(self):
+        out = self.run_script(["pagew 65 12h BRG C 60 30 " + feed("Sevilla")
+                               + " off -"])[0]
+        # The switch beside the other weather settings: exactly the two
+        # accepted values, the current one preselected.
+        self.assertIn('name="weatheron"', out)
+        self.assertIn('value="on">', out)
+        self.assertIn('value="off" selected>', out)
+        self.assertNotIn('value="on" selected>', out)
+        # The page states plainly that turning it off stops the downloads
+        # and hands the screen to the clock.
+        self.assertIn("stops downloading the forecast", out)
+        self.assertIn("clock always stays on screen", out)
+
+    def test_page_preselects_the_switch_on_by_default(self):
+        out = self.run_script(["pagew 30 24h RGB C 20 10 " + feed("Sevilla")
+                               + " on -"])[0]
+        self.assertIn('value="on" selected>', out)
+        self.assertIn('value="off">', out)
+        self.assertNotIn('value="off" selected>', out)
+        # The legacy eight-argument pagew form (and the legacy page command)
+        # still render the switch, preselected on.
+        legacy = self.run_script(["pagew 30 24h RGB C 20 10 " + feed("Sevilla")
+                                  + " -"])[0]
+        self.assertIn('value="on" selected>', legacy)
+        self.assertIn('name="weatheron"', legacy)
+        self.assertIn('name="weatheron"', self.run_script(["page 30 24h RGB -"])[0])
 
     def test_old_page_command_still_renders_every_control(self):
         # PRESERVE: the previous signature keeps rendering the full extended
@@ -973,3 +1103,4 @@ class WeatherSettingsTests(SettingsTests):
         self.assertNotIn('"citylat"', reset)
         self.assertNotIn('"citylon"', reset)
         self.assertNotIn('"cityname"', reset)
+        self.assertNotIn('"weatheron"', reset)

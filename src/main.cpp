@@ -245,14 +245,16 @@ class ProvisionedSettingsStore : public panel_settings::SettingsStore {
 
 static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock,
                                rgb_order::Order order, uint8_t clockSeconds,
-                               uint8_t weatherSeconds, weather::Unit unit) {
+                               uint8_t weatherSeconds, weather::Unit unit,
+                               bool weatherOn) {
   if (!preferences.begin("gentle", false)) return false;
   static ProvisionedSettingsStore store(preferences);
-  // T4b: all six keys of POST /config persist as ONE verified transaction
-  // (the combined storeAllSettings), so a failure never leaves the stored
-  // settings mixed across the panel and weather surfaces.
+  // T4b + S14: all seven keys of POST /config persist as ONE verified
+  // transaction (the combined storeAllSettings), so a failure never leaves
+  // the stored settings mixed across the panel and weather surfaces.
   const bool verified = panel_settings::storeAllSettings(
-      store, percent, clock, order, clockSeconds, weatherSeconds, unit);
+      store, percent, clock, order, clockSeconds, weatherSeconds, unit,
+      weatherOn);
   preferences.end();
   return verified;
 }
@@ -289,6 +291,7 @@ static weather::Unit weatherUnit = weather::Unit::Celsius;
 static uint8_t clockSecs = weather::CLOCK_SECONDS_DEFAULT;
 static uint8_t weatherSecs = weather::WEATHER_SECONDS_DEFAULT;
 static weather::CityRecord weatherCity;
+static bool weatherOn = true; // S14: on by default; loaded from `gentle` below.
 
 // T4b: the weather settings load — each key falls back to its documented
 // default through the committed loaders, including the whole Sevilla record
@@ -299,10 +302,12 @@ static void loadWeatherSettings() {
   weatherUnit = weather::Unit::Celsius;
   clockSecs = weather::CLOCK_SECONDS_DEFAULT;
   weatherSecs = weather::WEATHER_SECONDS_DEFAULT;
+  weatherOn = true;
   if (!preferences.begin("gentle", true)) return;
   const uint8_t storedClockSecs = preferences.getUChar("clocksecs", 255);
   const uint8_t storedWeatherSecs = preferences.getUChar("weathersecs", 255);
   const uint8_t storedUnits = preferences.getUChar("units", 255);
+  const uint8_t storedWeatherOn = preferences.getUChar("weatheron", 255);
   const bool storedCity = preferences.isKey("citylat") &&
                           preferences.isKey("citylon") &&
                           preferences.isKey("cityname");
@@ -313,6 +318,7 @@ static void loadWeatherSettings() {
   clockSecs = panel_settings::clockSecondsOrDefault(storedClockSecs);
   weatherSecs = panel_settings::weatherSecondsOrDefault(storedWeatherSecs);
   weatherUnit = panel_settings::unitOrDefault(storedUnits);
+  weatherOn = panel_settings::weatherOnOrDefault(storedWeatherOn);
   weatherCity = panel_settings::storedCityOrDefault(storedCity, storedLat,
                                                     storedLon, storedName);
 }
@@ -381,6 +387,13 @@ static WeatherHttpsTransport weatherTransport;
 // failed attempt keeps the previous forecast; the blocking budget is the
 // transport's 5 s + 3 s.
 static void pollWeather() {
+  // S14 first: with the persisted switch off the scheduler is never ticked
+  // at all — in any mode, portal or connected — so no TLS connection is
+  // attempted, not even the first one after boot. A request already in
+  // flight (none can be: the whole fetch runs synchronously inside this
+  // call, which never runs while a station request owns the client) is
+  // always allowed to finish rather than abandoned mid-connection.
+  if (!weatherOn) return;
   if (portalActive) return;               // portal/AP mode owns the radio
   if (WiFi.status() != WL_CONNECTED) return;
   if (client) return;                     // a station request is in flight
@@ -540,7 +553,8 @@ static void renderContent() {
     // when a forecast is held in RAM AND not stale. When it is not shown,
     // the clock render below is byte for byte exactly as before - this
     // block is the only difference on this path.
-    if (weatherForecast.valid && !weatherScheduler.stale(millis()) &&
+    if (weatherOn && weatherForecast.valid &&
+        !weatherScheduler.stale(millis()) &&
         weather::slotAt(static_cast<uint64_t>(epoch), clockSecs,
                         weatherSecs) == weather::Slot::Weather) {
       weather_screen::draw(weatherForecast, weatherUnit, calendar,
@@ -1071,24 +1085,25 @@ static void replyHtml(int code, const std::string &body) {
 // --- S8 (T13): the LAN settings routes on the station server -------------
 
 // The settings page with the live values: one render helper for the GET
-// reply and for every POST rejection, now carrying the T4a weather values
-// (durations, unit and the resolved city) preselected.
+// reply and for every POST rejection, now carrying the T4a/S14 weather
+// values (durations, unit, the switch and the resolved city) preselected.
 static std::string configPageWithError(const std::string &error) {
   return panel_settings::configPage(panel::brightnessPercent(), clockFormat,
                                     channelOrder, weatherUnit, clockSecs,
-                                    weatherSecs, weatherCity.name, error);
+                                    weatherSecs, weatherOn, weatherCity.name,
+                                    error);
 }
 
-// POST /config application (T4b): parse + review of all six values, then
-// ONE verified store across them all (the combined storeAllSettings, so a
-// failure never leaves the stored settings mixed across the panel and
+// POST /config application (T4b + S14): parse + review of all seven values,
+// then ONE verified store across them all (the combined storeAllSettings, so
+// a failure never leaves the stored settings mixed across the panel and
 // weather surfaces), then the live application. A rejected value or a
 // malformed body re-renders the page with the reason and changes nothing;
 // the runtime state only moves after the store verified. Brightness, clock
-// format, the durations and the unit apply immediately; the channel order
-// takes effect only through a restart, and ONLY when the value actually
-// changed — the driver fixes the pins at construction, so saving
-// the same value again must not reboot the board.
+// format, the durations, the unit and the weather switch apply immediately;
+// the channel order takes effect only through a restart, and ONLY when the
+// value actually changed — the driver fixes the pins at construction, so
+// saving the same value again must not reboot the board.
 static void applyConfigSave() {
   const panel_settings::SettingsFields fields =
       panel_settings::parseSettingsForm(configBody.data(), configBody.size());
@@ -1104,6 +1119,8 @@ static void applyConfigSave() {
       panel_settings::reviewSeconds(fields.weathersecs);
   const panel_settings::UnitChoice unit =
       panel_settings::reviewUnits(fields.units);
+  const panel_settings::WeatherOnChoice weatherSwitch =
+      panel_settings::reviewWeatherOn(fields.weatheron);
   const char *error = !fields.ok
       ? "Malformed form data. Reload the page and try again."
       : !brightness.ok ? "Unknown brightness value."
@@ -1112,6 +1129,7 @@ static void applyConfigSave() {
       : !clockDuration.ok ? "Unknown clock duration."
       : !weatherDuration.ok ? "Unknown weather duration."
       : !unit.ok ? "Unknown temperature unit."
+      : !weatherSwitch.ok ? "Unknown weather switch."
       : nullptr;
   if (error) {
     replyHtml(400, configPageWithError(error));
@@ -1119,12 +1137,24 @@ static void applyConfigSave() {
   }
   if (storePanelSettings(brightness.percent, clock.format, order.value,
                          clockDuration.seconds, weatherDuration.seconds,
-                         unit.unit)) {
+                         unit.unit, weatherSwitch.on)) {
     panel::setBrightnessPercent(brightness.percent);
     clockFormat = clock.format;
     clockSecs = clockDuration.seconds;
     weatherSecs = weatherDuration.seconds;
     weatherUnit = unit.unit;
+    weatherOn = weatherSwitch.on; // applies live, without a restart
+    // S14: switching back on with a missing or stale forecast books an
+    // immediate attempt — a fresh scheduler fetches on the very first tick
+    // of the next connected pollWeather — so switching back on never waits
+    // half an hour for the first update. A still-fresh held forecast keeps
+    // the running 30-minute cadence untouched. No fetch can be in flight
+    // here (pollWeather never runs while a station request — this one — is
+    // open), so nothing pending is left behind or abandoned.
+    if (weatherOn &&
+        (!weatherForecast.valid || weatherScheduler.stale(millis()))) {
+      weatherScheduler = weather_fetch::Scheduler();
+    }
     presentDisplay(); // live application: this frame already uses the values
     if (order.value != channelOrder) {
       replyHtml(200, panel_settings::configSavedPage(true));

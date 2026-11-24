@@ -57,6 +57,13 @@ class WeatherWiringTests(unittest.TestCase):
         self.assertIn("if (portalActive) return;", poll)
         self.assertIn("if (WiFi.status() != WL_CONNECTED) return;", poll)
         self.assertIn("if (client) return;", poll)
+        # S14: the persisted switch sits FIRST — while it is off the
+        # scheduler is never ticked at all, in any mode (no portal or
+        # connection check gets to decide anything): no TLS connection, not
+        # even the first attempt after boot.
+        self.assertIn("if (!weatherOn) return;", poll)
+        self.assertLess(poll.index("if (!weatherOn) return;"),
+                        poll.index("weatherScheduler.tick("))
         self.assertIn("weatherScheduler.tick(millis(), true, false)", poll)
         self.assertIn("weather_fetch::fetchForecast(weatherTransport,",
                       poll)
@@ -82,7 +89,10 @@ class WeatherWiringTests(unittest.TestCase):
         gate = clock_branch.split("idle_clock::draw(calendar, animationTick,",
                                   1)[0]
         # The weather screen only with a HELD forecast that is NOT stale,
-        # and only in the Weather phase of the committed slot rule.
+        # and only in the Weather phase of the committed slot rule. S14:
+        # also only while the persisted switch is on — with it off the
+        # clock owns the screen even if a forecast is still held.
+        self.assertIn("weatherOn &&", gate)
         self.assertIn("weatherForecast.valid &&", gate)
         self.assertIn("!weatherScheduler.stale(millis())", gate)
         self.assertIn("weather::slotAt(", gate)
@@ -135,25 +145,36 @@ class WeatherWiringTests(unittest.TestCase):
 
     # --- the settings surface -------------------------------------------------
 
-    def test_six_key_transaction_and_live_application(self):
+    def test_seven_key_transaction_and_live_application(self):
         source = self.source()
         apply = source.split("static void applyConfigSave() {", 1)[1].split(
             "\n}\n", 1)[0]
         for review in ("reviewBrightness", "reviewClock", "reviewOrder",
-                       "clockDuration", "weatherDuration", "reviewUnits"):
+                       "clockDuration", "weatherDuration", "reviewUnits",
+                       "reviewWeatherOn", "weatherSwitch"):
             self.assertIn(review, apply)
         for reason in ("Unknown clock duration.", "Unknown weather duration.",
-                       "Unknown temperature unit."):
+                       "Unknown temperature unit.", "Unknown weather switch."):
             self.assertIn(reason, apply)
-        # One transaction across all six keys; the live state moves only
+        # One transaction across all seven keys; the live state moves only
         # inside the verified branch.
-        self.assertIn("clockDuration.seconds, weatherDuration.seconds,",
-                      apply)
+        self.assertIn("clockDuration.seconds, weatherDuration.seconds,", apply)
+        self.assertIn("unit.unit, weatherSwitch.on", apply)
         applied = apply.split("if (storePanelSettings(", 1)[1]
         for wired in ("clockSecs = clockDuration.seconds;",
                       "weatherSecs = weatherDuration.seconds;",
-                      "weatherUnit = unit.unit;"):
+                      "weatherUnit = unit.unit;",
+                      "weatherOn = weatherSwitch.on;"):
             self.assertIn(wired, applied)
+        # S14: switching back on with a missing or stale forecast resets the
+        # scheduler so the very first tick fetches immediately; a still-fresh
+        # held forecast keeps the running cadence. No fetch can be in flight
+        # here (pollWeather never runs while a station request is open), so
+        # nothing pending is abandoned.
+        self.assertIn("weatherScheduler.stale(millis())", applied)
+        self.assertIn("weatherScheduler = weather_fetch::Scheduler();", applied)
+        self.assertLess(applied.index("weatherOn = weatherSwitch.on;"),
+                        applied.index("weatherScheduler = weather_fetch::Scheduler();"))
         # The page carries the live weather values.
         self.assertIn("configPage(panel::brightnessPercent(), clockFormat,\n"
                       "                                    channelOrder, weatherUnit, clockSecs,",
@@ -181,6 +202,10 @@ class WeatherWiringTests(unittest.TestCase):
         self.assertIn("panel_settings::weatherSecondsOrDefault(", load)
         self.assertIn("panel_settings::unitOrDefault(", load)
         self.assertIn("panel_settings::storedCityOrDefault(", load)
+        # S14: the switch loads through the same fallback loader, defaulting
+        # to on for an absent or invalid stored byte.
+        self.assertIn('preferences.getUChar("weatheron", 255)', load)
+        self.assertIn("panel_settings::weatherOnOrDefault(", load)
         setup = source.split("void setup() {", 1)[1]
         self.assertLess(setup.index("loadPanelSettings();"),
                         setup.index("loadWeatherSettings();"))
@@ -192,6 +217,12 @@ class WeatherWiringTests(unittest.TestCase):
         health = source.split("if (request.health) {", 1)[1].split("return;", 1)[0]
         self.assertIn('\\"weather\\":', health)
         self.assertIn("weather::jsonEscape(weatherCity.name)", health)
+        # S14: the field keeps its exact meaning — a forecast is HELD — and
+        # is independent of the persisted switch: it still reads the held
+        # record, never the switch state.
+        self.assertIn('weatherForecast.valid ? "true" : "false"',
+                      health)
+        self.assertNotIn("weatherOn", health)
         # The portal identity field keeps its position at the end.
         self.assertLess(health.index("weather"),
                         health.index('\\"portal\\":false}'))

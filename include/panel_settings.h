@@ -185,24 +185,25 @@ inline long parseContentLength(const std::string &requestHeaders) {
   return strtol(digits.c_str(), nullptr, 10);
 }
 
-// application/x-www-form-urlencoded POST /config body (T4a): exactly the
-// six keys `brightness`, `clock`, `order`, `clocksecs`, `weathersecs` and
-// `units`, each at most once, no unknown keys — the page's own form always
-// submits all six, so all are required; '+' is a space and %XX requires two
-// hex digits (the shared portal urlencoded discipline, so malformed bodies
-// are rejected, not coerced). Empty values parse and are rejected later by
-// the per-value review with its reason.
+// application/x-www-form-urlencoded POST /config body (T4a + S14): exactly
+// the SEVEN keys `brightness`, `clock`, `order`, `clocksecs`, `weathersecs`,
+// `units` and `weatheron`, each at most once, no unknown keys — the page's
+// own form always submits all seven, so all are required; '+' is a space and
+// %XX requires two hex digits (the shared portal urlencoded discipline, so
+// malformed bodies are rejected, not coerced). Empty values parse and are
+// rejected later by the per-value review with its reason.
 struct SettingsFields {
   bool ok = false;
-  std::string brightness, clock, order, clocksecs, weathersecs, units;
+  std::string brightness, clock, order, clocksecs, weathersecs, units,
+      weatheron;
 };
 
 inline SettingsFields parseSettingsForm(const char *body, size_t length) {
   SettingsFields result;
   const std::string input(body, length);
-  bool saw[6] = {false, false, false, false, false, false};
-  const char *const KEY[6] = {"brightness", "clock", "order",
-                              "clocksecs", "weathersecs", "units"};
+  bool saw[7] = {false, false, false, false, false, false, false};
+  const char *const KEY[7] = {"brightness", "clock", "order", "clocksecs",
+                              "weathersecs", "units", "weatheron"};
   size_t start = 0;
   for (;;) {
     const size_t amp = input.find('&', start);
@@ -215,22 +216,24 @@ inline SettingsFields parseSettingsForm(const char *body, size_t length) {
       const std::string key = pair.substr(0, eq);
       std::string value;
       if (!portal::decodeUrlValue(pair.substr(eq + 1), value)) return result;
-      size_t index = 6;
-      for (size_t k = 0; k < 6; ++k)
+      size_t index = 7;
+      for (size_t k = 0; k < 7; ++k)
         if (key == KEY[k]) index = k;
-      if (index == 6 || saw[index]) return result;
+      if (index == 7 || saw[index]) return result;
       saw[index] = true;
       if (index == 0) result.brightness = value;
       else if (index == 1) result.clock = value;
       else if (index == 2) result.order = value;
       else if (index == 3) result.clocksecs = value;
       else if (index == 4) result.weathersecs = value;
-      else result.units = value;
+      else if (index == 5) result.units = value;
+      else result.weatheron = value;
     }
     if (last) break;
     start = amp + 1;
   }
-  result.ok = saw[0] && saw[1] && saw[2] && saw[3] && saw[4] && saw[5];
+  result.ok = saw[0] && saw[1] && saw[2] && saw[3] && saw[4] && saw[5] &&
+              saw[6];
   return result;
 }
 
@@ -324,11 +327,12 @@ inline OrderChoice reviewOrder(const std::string &value) {
   return choice;
 }
 
-// --- T4a: the weather settings of the LAN page -----------------------------
+// --- T4a (+ S14): the weather settings of the LAN page ---------------------
 // New keys next to the panel triple, all in `gentle`, all with read-back
 // verification and none in the DOWN-reset scope: `clocksecs`,
 // `weathersecs` (seconds, 5..120 step 5; defaults 20 and 10), `units`
-// (0 = Celsius default, 1 = Fahrenheit) and the resolved city
+// (0 = Celsius default, 1 = Fahrenheit), the S14 switch `weatheron` (1 = on
+// default, 0 = off) and the resolved city
 // `citylat`/`citylon` (signed int32 micro-degrees) + `cityname` (<= 24
 // bytes). Absent or outside-the-set stored values fall back to the
 // documented defaults — including the whole Sevilla record from
@@ -391,6 +395,40 @@ inline weather::Unit unitOrDefault(uint8_t stored) {
   return weather::unitFromCode(stored, unit) ? unit : weather::Unit::Celsius;
 }
 
+// S14: the persisted weather-feature switch, its own byte in `gentle` —
+// code 1 = on (the documented DEFAULT), code 0 = off. An absent or invalid
+// stored byte falls back to the documented default (on) exactly like the
+// other fallback loaders above. While the switch is off the firmware never
+// ticks the fetch scheduler (no TLS connection at all, not even the first
+// one after boot) and the clock owns the screen; the /health `weather`
+// field keeps its independent meaning (a forecast is HELD).
+constexpr uint8_t WEATHER_ON_CODE = 1;
+constexpr uint8_t WEATHER_OFF_CODE = 0;
+
+// Exactly "on" or "off" (the page sends these values); anything else is
+// rejected, not coerced and not case-forgiven.
+struct WeatherOnChoice {
+  bool ok = false;
+  bool on = true;
+};
+inline WeatherOnChoice reviewWeatherOn(const std::string &value) {
+  WeatherOnChoice choice;
+  if (value == "on") choice.ok = true;
+  else if (value == "off") {
+    choice.ok = true;
+    choice.on = false;
+  }
+  return choice;
+}
+inline const char *weatherOnName(bool on) { return on ? "on" : "off"; }
+
+inline bool weatherOnOrDefault(uint8_t stored) {
+  if (stored == WEATHER_OFF_CODE) return false;
+  // 1 = on; every other byte (including an absent key's sentinel) is
+  // invalid and falls back to the documented default, on.
+  return true;
+}
+
 // The stored city, falling back to the S6 default: the transaction below
 // guarantees all-or-nothing, so an incomplete or unusable stored record
 // resolves to the whole Sevilla default (exact values committed in the
@@ -447,25 +485,30 @@ inline bool storeWeatherSettings(SettingsStore &store, uint8_t clockSeconds,
 }
 
 // T4b: the combined transaction of POST /config — the panel triple and the
-// weather triple in ONE atomic store over the same verified discipline, so
+// weather settings in ONE atomic store over the same verified discipline, so
 // a failure never leaves the stored settings mixed across the two surfaces:
 // one snapshot, one rollback, read-back-only decisions, write order
-// brightness, clockformat, rgborder, clocksecs, weathersecs, units.
+// brightness, clockformat, rgborder, clocksecs, weathersecs, units and, as
+// the seventh key (S14), weatheron.
 inline bool storeAllSettings(SettingsStore &store, uint8_t brightnessPercent,
                              idle_clock::ClockFormat clock,
                              rgb_order::Order order, uint8_t clockSeconds,
-                             uint8_t weatherSeconds, weather::Unit unit) {
+                             uint8_t weatherSeconds, weather::Unit unit,
+                             bool weatherOn) {
   if (!panel::validBrightnessPercent(brightnessPercent)) return false;
   if (!weather::validSeconds(clockSeconds) ||
       !weather::validSeconds(weatherSeconds))
     return false;
-  const detail::UCharKey keys[6] = {{"brightness", brightnessPercent},
+  const detail::UCharKey keys[7] = {{"brightness", brightnessPercent},
                                     {"clockformat",
                                      idle_clock::clockFormatCode(clock)},
                                     {"rgborder", rgb_order::orderCode(order)},
                                     {"clocksecs", clockSeconds},
                                     {"weathersecs", weatherSeconds},
-                                    {"units", weather::unitCode(unit)}};
+                                    {"units", weather::unitCode(unit)},
+                                    {"weatheron",
+                                     weatherOn ? WEATHER_ON_CODE
+                                               : WEATHER_OFF_CODE}};
   return detail::storeUCharKeys(store, keys);
 }
 
@@ -553,7 +596,7 @@ inline bool clearOrientationReference(SettingsStore &store) {
   return !store.hasUChar("updir") && !store.readUChar("updir", back);
 }
 
-// GET /config (S8 + T4a): the settings page with the current values
+// GET /config (S8 + T4a + S14): the settings page with the current values
 // preselected. No authentication by decision — the page lives on the local
 // network like every other route of this server. An error re-renders inside
 // a visible error block carrying only the escaped reason. Brightness and
@@ -564,7 +607,10 @@ inline bool clearOrientationReference(SettingsStore &store) {
 // under POST /config/city (a separate submission with its own route, so
 // the settings form and the search cannot be mixed); the page states that
 // the weather screen needs a resolved city and that the durations are in
-// seconds; the current city name is shown escaped. T17: an "Orientation"
+// seconds; the current city name is shown escaped. S14: a `weatheron`
+// select joins the weather settings with exactly the two accepted values
+// and the page states plainly that turning the feature off also stops the
+// forecast downloads — the clock owns the screen. T17: an "Orientation"
 // section offers the deliberate recalibration in its own form (POST
 // /config/orientation): clear the saved upright reference and the board
 // restarts to re-learn it, which the page says plainly, together with the
@@ -572,7 +618,7 @@ inline bool clearOrientationReference(SettingsStore &store) {
 inline std::string configPage(
     uint8_t brightnessPercent, idle_clock::ClockFormat clock,
     rgb_order::Order order, weather::Unit unit, uint8_t clockSecs,
-    uint8_t weatherSecs, const std::string &cityName,
+    uint8_t weatherSecs, bool weatherOn, const std::string &cityName,
     const std::string &error = "") {
   std::string page =
       "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -592,7 +638,9 @@ inline std::string configPage(
       "Changing the panel colour order restarts the board to apply it: the "
       "display driver fixes its pins at construction. Durations are in "
       "seconds. The weather screen shows only with a resolved city: search "
-      "one below.</p>";
+      "one below. Turning the weather feature off also stops downloading "
+      "the forecast: the clock always stays on screen and the board makes "
+      "no network requests for it.</p>";
   if (!error.empty())
     page += "<p class=\"error\">" + portal_page::escapeHtml(error) + "</p>";
   // T4a: the city search is its own submission to its own route, with a
@@ -674,6 +722,15 @@ inline std::string configPage(
     page += "</option>";
   }
   page += "</select></label>"
+          "<label>Weather feature<select name=\"weatheron\">";
+  for (const bool on : {true, false}) {
+    page += "<option value=\"";
+    page += weatherOnName(on);
+    page += on == weatherOn ? "\" selected>" : "\">";
+    page += on ? "On (default)" : "Off";
+    page += "</option>";
+  }
+  page += "</select></label>"
           "<label>Panel colour order<select name=\"order\">";
   for (uint8_t i = 0; i < rgb_order::ORDER_COUNT; ++i) {
     const rgb_order::Order candidate = static_cast<rgb_order::Order>(i);
@@ -693,15 +750,15 @@ inline std::string configPage(
 // The previous four-argument signature keeps compiling for its existing
 // call site until T4b switches it to the live weather values: the extended
 // page is rendered with the DOCUMENTED DEFAULTS (Celsius, 20 s / 10 s, the
-// Sevilla default city), so nothing old breaks and nothing extra has to be
-// stored yet.
+// switch on, the Sevilla default city), so nothing old breaks and nothing
+// extra has to be stored yet.
 inline std::string configPage(uint8_t brightnessPercent,
                               idle_clock::ClockFormat clock,
                               rgb_order::Order order,
                               const std::string &error = "") {
   return configPage(brightnessPercent, clock, order, weather::Unit::Celsius,
                     weather::CLOCK_SECONDS_DEFAULT,
-                    weather::WEATHER_SECONDS_DEFAULT,
+                    weather::WEATHER_SECONDS_DEFAULT, true,
                     weather::defaultCity().name, error);
 }
 
