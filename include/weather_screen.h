@@ -1,0 +1,133 @@
+#pragma once
+#include "weather.h"
+#include "idle_clock_image.h"
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+
+// Weather screen renderer (T2): the forecast grid over the whole 64x64
+// canvas — a 1 px vertical divider in column 32 and a 1 px horizontal
+// divider in row 32 in the muted ink, and the four cells (today top left,
+// +1 top right, +2 bottom left, +3 bottom right), each showing its
+// three-letter day label, the maximum at scale 2, the minimum at scale 1
+// and the precipitation probability as NN% at scale 1, all drawn through
+// the same 3x5 glyph table and text() helper the clock uses. Colors leave
+// this renderer raw 565; the pixel callback applies the shared brightness
+// helper panel::color() exactly like every idle_clock::draw call site, so
+// the whole screen dims with the panel setting. No Arduino/WiFi symbols.
+namespace weather_screen {
+
+// Geometry fixed by the spec (S1): the dividers cross at (32, 32); each
+// cell owns a 31x31 content area anchored at its origin, so the spare
+// column 31/row 31 keeps every glyph clear of the divider even when a
+// value fills its cell completely.
+constexpr int DIVIDER = 32;
+constexpr int CELL = 31;
+constexpr int RIGHT_X = 33;  // left edge of the two right-hand cells
+constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
+
+// Row offsets inside a cell: label y+0 (scale 1), maximum y+7 (scale 2),
+// minimum y+19 (scale 1), probability y+25 (scale 1). The last painted row
+// is y+29, one row short of the region end.
+constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19, DY_PROB = 25;
+constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 1, SCALE_PROB = 1;
+
+// Inks: the dividers are the muted ink (S1); the cell palette mirrors the
+// clock — white headline maximum, blue minimum, amber probability, muted
+// day labels.
+constexpr uint16_t INK_DIVIDER = idle_clock::MUTED;
+constexpr uint16_t INK_LABEL = idle_clock::MUTED;
+constexpr uint16_t INK_MAX = idle_clock::WHITE;
+constexpr uint16_t INK_MIN = idle_clock::BLUE;
+constexpr uint16_t INK_PROB = idle_clock::AMBER;
+
+// The clock glyph table has no percent sign, and the table is shared with
+// the clock (its bitmaps must never move), so the one missing glyph is
+// defined here and drawn by the same plot discipline: a top-left dot, a
+// bottom-right dot and the anti-diagonal between them.
+constexpr uint8_t PCT[5] = {5, 1, 2, 4, 5};
+
+// Truncation rule (T2 decision): a value that would not fit its 31 px cell
+// loses WHOLE trailing characters (never a mid-glyph cut) until it fits,
+// e.g. a maximum of -100.0 at scale 2 renders as "-100". Combined with the
+// per-cell region clamp below, nothing a cell draws can ever overwrite the
+// neighbouring cell or touch a divider. Word width for n glyphs at scale s
+// is 4*n*s - s (advance 4*s per character, the last glyph is 3*s wide).
+namespace detail {
+inline size_t fitLength(const char *value, int scale) {
+  size_t n = std::strlen(value);
+  while (n > 1 && 4 * static_cast<int>(n) * scale - scale > CELL) --n;
+  return n;
+}
+
+// The probability digits plus the percent glyph: the digits are drawn by
+// the shared text() helper and the percent sign follows them, occupying its
+// own 4*scale cell exactly like any other character would.
+inline int probabilityWidth(int digits) {
+  return 4 * (digits + 1) - 1;
+}
+} // namespace detail
+
+template<class Pixel>
+void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
+              weather::Unit shown, const std::tm &calendar, Pixel pixel) {
+  // The cell's own viewport: any glyph pixel outside the 31x31 region is
+  // dropped, so overflowing text is visibly truncated at the cell edge and
+  // never crosses into the neighbour or over a divider.
+  auto plot = [&](int x, int y, uint16_t color) {
+    if (x >= x0 && x < x0 + CELL && y >= y0 && y < y0 + CELL)
+      pixel(x, y, color);
+  };
+  char buffer[12];
+  auto put = [&](const char *value, int dy, int scale, uint16_t color) {
+    char fitted[12];
+    const size_t n = detail::fitLength(value, scale);
+    const size_t take = n < sizeof fitted ? n : sizeof fitted - 1;
+    std::memcpy(fitted, value, take);
+    fitted[take] = '\0';
+    idle_clock::text(fitted, x0, y0 + dy, scale, color, plot);
+  };
+  // Three-letter day label: HOY for today, then the weekday from the RTC.
+  put(weather::dayLabel(index, calendar.tm_wday), DY_LABEL, SCALE_LABEL,
+      INK_LABEL);
+  // The maximum is the headline value: scale 2, converted to the shown unit.
+  std::snprintf(buffer, sizeof buffer, "%d",
+                weather::roundedDegrees(weather::displayedTenths(
+                    forecast.tmax[index], forecast.unit, shown)));
+  put(buffer, DY_MAX, SCALE_MAX, INK_MAX);
+  std::snprintf(buffer, sizeof buffer, "%d",
+                weather::roundedDegrees(weather::displayedTenths(
+                    forecast.tmin[index], forecast.unit, shown)));
+  put(buffer, DY_MIN, SCALE_MIN, INK_MIN);
+  // Zero-padded two digits (100 keeps three) plus the percent glyph; with
+  // probability <= 100 the field is at most "100%" (15 px), never truncated.
+  std::snprintf(buffer, sizeof buffer, "%02u",
+                static_cast<unsigned>(forecast.prob[index]));
+  put(buffer, DY_PROB, SCALE_PROB, INK_PROB);
+  const int px = x0 + 4 * static_cast<int>(std::strlen(buffer));
+  for (int row = 0; row < 5; ++row)
+    for (int col = 0; col < 3; ++col)
+      if (PCT[row] & (4 >> col))
+        plot(px + col, y0 + DY_PROB + row, INK_PROB);
+}
+
+// The whole screen. A forecast that never parsed (no city, no network yet,
+// or a rejected body — the pure layer only publishes valid records) paints
+// nothing at all: the caller shows the clock instead until a forecast
+// exists, so a board without internet never flickers to an empty grid.
+template<class Pixel>
+void draw(const weather::Forecast &forecast, weather::Unit shown,
+          const std::tm &calendar, Pixel pixel) {
+  if (!forecast.valid) return;
+  for (int i = 0; i < 64; ++i) {
+    pixel(i, DIVIDER, INK_DIVIDER);
+    pixel(DIVIDER, i, INK_DIVIDER);
+  }
+  const int ORIGIN[4][2] = {{0, 0}, {RIGHT_X, 0}, {0, BOTTOM_Y},
+                            {RIGHT_X, BOTTOM_Y}};
+  for (size_t index = 0; index < 4; ++index)
+    drawCell(ORIGIN[index][0], ORIGIN[index][1], index, forecast, shown,
+             calendar, pixel);
+}
+
+} // namespace weather_screen
