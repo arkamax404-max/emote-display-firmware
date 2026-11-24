@@ -10,6 +10,7 @@
 // Cases:
 //   convert   unit code mapping, tenths conversion and display rounding
 //   parse     parseForecast: canonical body, tolerances and rejections
+//   icon      iconFor: the WMO group boundaries, pinned code by code
 //   city      parseCity: geocoding body, rejections, clampName
 //   labels    dayLabel: HOY plus the seven weekday names shifted
 //   slot      slotAt: alternation boundaries for the defaults and edge values
@@ -34,11 +35,11 @@
 namespace {
 bool hasForecast(const weather::Forecast &f, weather::Unit unit,
                  const int16_t tmax[4], const int16_t tmin[4],
-                 const unsigned prob[4]) {
+                 const unsigned prob[4], const unsigned code[4]) {
   bool ok = f.valid && f.unit == unit;
   for (int i = 0; i < 4; ++i)
     ok = ok && f.tmax[i] == tmax[i] && f.tmin[i] == tmin[i] &&
-         f.prob[i] == prob[i];
+         f.prob[i] == prob[i] && f.code[i] == code[i];
   return ok;
 }
 } // namespace
@@ -99,14 +100,16 @@ int main(int argc, char **argv) {
         "\"2026-02-08\"],"
         "\"temperature_2m_max\":[12.4,11.1,10.2,9.8],"
         "\"temperature_2m_min\":[3.1,-2.5,4.05,1.2],"
-        "\"precipitation_probability_max\":[10,45,80,5]},"
+        "\"precipitation_probability_max\":[10,45,80,5],"
+        "\"weather_code\":[1,61,0,95]},"
         "\"utc_offset_seconds\":3600}";
     weather::Forecast f;
     CHECK(weather::parseForecast(body, std::strlen(body), f));
     const int16_t tmax[4] = {124, 111, 102, 98};
     const int16_t tmin[4] = {31, -25, 41, 12}; // 4.05 -> 41 (second digit 5)
     const unsigned prob[4] = {10, 45, 80, 5};
-    CHECK(hasForecast(f, weather::Unit::Celsius, tmax, tmin, prob));
+    const unsigned code[4] = {1, 61, 0, 95};   // S8: the WMO code per day
+    CHECK(hasForecast(f, weather::Unit::Celsius, tmax, tmin, prob, code));
 
     // Re-parsing into a used record fully rewrites every field.
     CHECK(weather::parseForecast(body, std::strlen(body), f));
@@ -115,12 +118,14 @@ int main(int argc, char **argv) {
     const char *rounded =
         "{\"daily\":{\"temperature_2m_max\":[12.49,12.5,12.51,7],"
         "\"temperature_2m_min\":[3.15,3.149,0,0],"
-        "\"precipitation_probability_max\":[0,100,3,7]}}";
+        "\"precipitation_probability_max\":[0,100,3,7],"
+        "\"weather_code\":[0,1,2,3]}}";
     CHECK(weather::parseForecast(rounded, std::strlen(rounded), f));
     const int16_t rmax[4] = {125, 125, 125, 70};
     const int16_t rmin[4] = {32, 31, 0, 0};
     const unsigned rprob[4] = {0, 100, 3, 7};
-    CHECK(hasForecast(f, weather::Unit::Celsius, rmax, rmin, rprob));
+    const unsigned rcode[4] = {0, 1, 2, 3};
+    CHECK(hasForecast(f, weather::Unit::Celsius, rmax, rmin, rprob, rcode));
 
     weather::Forecast before;
     before.valid = true;
@@ -129,6 +134,7 @@ int main(int argc, char **argv) {
       before.tmax[i] = int16_t(i + 1);
       before.tmin[i] = int16_t(-i - 1);
       before.prob[i] = uint8_t(i * 10);
+      before.code[i] = uint8_t(10 + i);
     }
     // Every failure leaves the caller's record byte-for-byte untouched: the
     // previous forecast survives a bad body by construction.
@@ -152,6 +158,29 @@ int main(int argc, char **argv) {
         "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
         "\"temperature_2m_min\":[1,2,3,4],"
         "\"precipitation_probability_max\":[-1,2,3,4]}}", // negative probability
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4]}}",   // weather_code absent
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4],"
+        "\"weather_code\":[0,1,2]}}",                      // truncated code array
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4],"
+        "\"weather_code\":[0,1,2,null]}}",                 // a null code
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4],"
+        "\"weather_code\":[-1,0,0,0]}}",                   // negative code
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4],"
+        "\"weather_code\":[100,0,0,0]}}",                  // out of range
+        "{\"daily\":{\"temperature_2m_max\":[1,2,3,4],"
+        "\"temperature_2m_min\":[1,2,3,4],"
+        "\"precipitation_probability_max\":[1,2,3,4],"
+        "\"weather_code\":[\"0\",0,0,0]}}",                // string value
         "{\"error\":true,\"reason\":\"Bad Request\"}"      // Open-Meteo error
     };
     for (const char *b : bad) {
@@ -159,6 +188,51 @@ int main(int argc, char **argv) {
       CHECK(!weather::parseForecast(b, std::strlen(b), probe));
       CHECK(std::memcmp(&probe, &before, sizeof(probe)) == 0);
     }
+  } else if (test == "icon") {
+    // S8: the WMO grouping is pinned code by code — every boundary code of
+    // every group, the neighbours just outside each boundary, and codes
+    // outside every group (including far out of the WMO table).
+    using weather::iconFor;
+    using weather::Icon;
+    CHECK(iconFor(0) == Icon::Clear);
+    CHECK(iconFor(1) == Icon::PartlyCloudy);
+    CHECK(iconFor(2) == Icon::PartlyCloudy);
+    CHECK(iconFor(3) == Icon::Cloudy);
+    CHECK(iconFor(-1) == Icon::Unknown);
+    CHECK(iconFor(4) == Icon::Unknown);
+    CHECK(iconFor(44) == Icon::Unknown);
+    CHECK(iconFor(45) == Icon::Fog);
+    CHECK(iconFor(46) == Icon::Unknown);
+    CHECK(iconFor(47) == Icon::Unknown);
+    CHECK(iconFor(48) == Icon::Fog);
+    CHECK(iconFor(49) == Icon::Unknown);
+    CHECK(iconFor(50) == Icon::Unknown);
+    // Rain: the drizzles 51..57, the rains 61..67 and the showers 80..82.
+    CHECK(iconFor(51) == Icon::Rain);
+    CHECK(iconFor(57) == Icon::Rain);
+    CHECK(iconFor(58) == Icon::Unknown);
+    CHECK(iconFor(60) == Icon::Unknown);
+    CHECK(iconFor(61) == Icon::Rain);
+    CHECK(iconFor(67) == Icon::Rain);
+    CHECK(iconFor(68) == Icon::Unknown);
+    CHECK(iconFor(70) == Icon::Unknown);
+    // Snow: 71..77 plus the two snow showers 85/86.
+    CHECK(iconFor(71) == Icon::Snow);
+    CHECK(iconFor(77) == Icon::Snow);
+    CHECK(iconFor(78) == Icon::Unknown);
+    CHECK(iconFor(79) == Icon::Unknown);
+    CHECK(iconFor(80) == Icon::Rain);
+    CHECK(iconFor(82) == Icon::Rain);
+    CHECK(iconFor(83) == Icon::Unknown);
+    CHECK(iconFor(84) == Icon::Unknown);
+    CHECK(iconFor(85) == Icon::Snow);
+    CHECK(iconFor(86) == Icon::Snow);
+    CHECK(iconFor(87) == Icon::Unknown);
+    CHECK(iconFor(94) == Icon::Unknown);
+    // Storm: 95..99 inclusive; beyond the table, unknown again.
+    CHECK(iconFor(95) == Icon::Storm);
+    CHECK(iconFor(99) == Icon::Storm);
+    CHECK(iconFor(100) == Icon::Unknown);
   } else if (test == "city") {
     // Canonical geocoding body for a single result (the API emits results in
     // this field order; the extractor resolves latitude, longitude and name
@@ -283,22 +357,24 @@ int main(int argc, char **argv) {
     CHECK(std::string(weather::microDegreesString(40416775)) == "40.416775");
     CHECK(std::string(weather::microDegreesString(-3703790)) == "-3.703790");
     CHECK(std::string(weather::microDegreesString(0)) == "0.000000");
-    // The forecast query: today plus three days, the three daily arrays,
-    // timezone auto, and the unit parameter ONLY in Fahrenheit.
+    // The forecast query: today plus three days, the four daily arrays
+    // (S8 adds weather_code), timezone auto, and the unit parameter ONLY
+    // in Fahrenheit.
     const std::string celsius = weather::forecastPath(40416775, -3703790,
                                                     weather::Unit::Celsius);
     CHECK(std::string(weather::FORECAST_HOST) == forecastHost);
     CHECK(celsius ==
           "/v1/forecast?latitude=40.416775&longitude=-3.703790"
           "&daily=temperature_2m_max,temperature_2m_min,"
-          "precipitation_probability_max&timezone=auto&forecast_days=4");
+          "precipitation_probability_max,weather_code&timezone=auto"
+          "&forecast_days=4");
     const std::string farenheit = weather::forecastPath(0, 0,
                                                       weather::Unit::Fahrenheit);
     CHECK(farenheit ==
           "/v1/forecast?latitude=0.000000&longitude=0.000000"
           "&daily=temperature_2m_max,temperature_2m_min,"
-          "precipitation_probability_max&timezone=auto&forecast_days=4"
-          "&temperature_unit=fahrenheit");
+          "precipitation_probability_max,weather_code&timezone=auto"
+          "&forecast_days=4&temperature_unit=fahrenheit");
     // Geocoding: one result, Spanish, the city percent-encoded.
     CHECK(weather::geocodePath("Madrid") ==
           "/v1/search?name=Madrid&count=1&language=es");

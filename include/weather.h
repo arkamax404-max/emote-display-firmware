@@ -92,6 +92,7 @@ struct Forecast {
   int16_t tmax[4];
   int16_t tmin[4];
   uint8_t prob[4];
+  uint8_t code[4]; // S8: the daily integer WMO weather code, 0..99.
   Unit unit = Unit::Celsius;
   bool valid = false;
 };
@@ -218,6 +219,22 @@ inline bool parseProbability(const char *&p, const char *end, uint8_t &out) {
   return true;
 }
 
+// Non-negative plain JSON integer within [0, 99], for the WMO weather
+// code. No sign, no fraction, no exponent: anything else is a rejection,
+// never a coercion.
+inline bool parseCode(const char *&p, const char *end, uint8_t &out) {
+  if (p >= end || *p < '0' || *p > '9') return false;
+  int value = 0;
+  int digits = 0;
+  while (p < end && *p >= '0' && *p <= '9') {
+    if (++digits > 2) return false;
+    value = value * 10 + (*p - '0');
+    ++p;
+  }
+  out = static_cast<uint8_t>(value);
+  return true;
+}
+
 // A signed decimal into micro-degrees: |out| <= bound, exactly six kept
 // fractional digits (padded with zeros when the source has fewer), the
 // seventh decides a half-away rounding of the magnitude.
@@ -279,11 +296,11 @@ inline bool parseName(const char *&p, const char *end, std::string &out) {
 
 } // namespace detail
 
-// The forecast body: the three daily arrays each carry today plus three
-// further days in position order — exactly the four cells. Any absent,
-// malformed, null or out-of-range value fails the whole parse and the
-// caller keeps its previous forecast, because `out` is written only on
-// success.
+// The forecast body: the four daily arrays each carry today plus three
+// further days in position order — exactly the four cells (S8 adds the
+// integer WMO codes of the same four days). Any absent, malformed, null or
+// out-of-range value fails the whole parse and the caller keeps its
+// previous forecast, because `out` is written only on success.
 inline bool parseForecast(const char *json, size_t length, Forecast &out) {
   const char *end = json + length;
   Forecast candidate;
@@ -320,6 +337,23 @@ inline bool parseForecast(const char *json, size_t length, Forecast &out) {
     for (int i = 0; i < 4; ++i) {
       while (p < end && *p == ' ') ++p;
       if (!detail::parseProbability(p, end, candidate.prob[i])) return false;
+      while (p < end && *p == ' ') ++p;
+      if (i < 3) {
+        if (p >= end || *p != ',') return false;
+        ++p;
+      }
+    }
+    if (p >= end || *p != ']') return false; // the array must actually close
+    ++p;
+  }
+  {
+    // S8: the WMO weather codes of the same four days, parsed with the
+    // same all-or-nothing, rejection-based discipline as the other arrays.
+    const char *p = detail::afterArrayField(json, end, "\"weather_code\"");
+    if (!p) return false;
+    for (int i = 0; i < 4; ++i) {
+      while (p < end && *p == ' ') ++p;
+      if (!detail::parseCode(p, end, candidate.code[i])) return false;
       while (p < end && *p == ' ') ++p;
       if (i < 3) {
         if (p >= end || *p != ',') return false;
@@ -372,6 +406,27 @@ inline const char *dayLabel(size_t index, int weekday) {
   int wday = weekday % 7;
   if (wday < 0) wday += 7;
   return WEEK[static_cast<size_t>((wday + static_cast<int>(index)) % 7)];
+}
+
+// S8: the icon grouping — every WMO code falls in exactly one of the seven
+// drawn groups or in the explicit unknown state (a code outside every
+// group, including Open-Meteo's gaps like 46/47 and anything beyond the
+// table: no bitmap is defined for it, so those cells show no icon).
+enum class Icon : uint8_t {
+  Clear, PartlyCloudy, Cloudy, Fog, Rain, Snow, Storm, Unknown
+};
+inline Icon iconFor(int code) {
+  if (code == 0) return Icon::Clear;
+  if (code >= 1 && code <= 2) return Icon::PartlyCloudy;
+  if (code == 3) return Icon::Cloudy;
+  if (code == 45 || code == 48) return Icon::Fog;
+  if ((code >= 51 && code <= 57) || (code >= 61 && code <= 67) ||
+      (code >= 80 && code <= 82))
+    return Icon::Rain;
+  if ((code >= 71 && code <= 77) || code == 85 || code == 86)
+    return Icon::Snow;
+  if (code >= 95 && code <= 99) return Icon::Storm;
+  return Icon::Unknown;
 }
 
 // S1/S4: the alternation slot over the monotonic tick the clock animation
@@ -432,13 +487,15 @@ inline std::string microDegreesString(int32_t micro) {
 }
 
 // The forecast query: today plus three further days as the four cells, the
-// three daily arrays, automatic timezone; Fahrenheit only in °F mode.
+// four daily arrays (S8 adds weather_code), automatic timezone; Fahrenheit
+// only in °F mode.
 inline std::string forecastPath(int32_t latMicro, int32_t lonMicro, Unit unit) {
   std::string path =
       std::string("/v1/forecast?latitude=") + microDegreesString(latMicro) +
       "&longitude=" + microDegreesString(lonMicro) +
       "&daily=temperature_2m_max,temperature_2m_min,"
-      "precipitation_probability_max&timezone=auto&forecast_days=4";
+      "precipitation_probability_max,weather_code&timezone=auto"
+      "&forecast_days=4";
   if (unit == Unit::Fahrenheit) path += "&temperature_unit=fahrenheit";
   return path;
 }

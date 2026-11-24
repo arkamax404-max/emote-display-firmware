@@ -16,9 +16,10 @@
 //             it closes), the 30-minute success interval, the 60 s failure
 //             retry, the forgotten-completed case, millis wrap
 //   stale     never-succeeded reports stale; fresh/boundary/wrap after 26 h
-//   forecast  applyForecast: 200 + canonical body updates; non-200, empty,
-//             oversized (boundary at exactly BODY_MAX) and parse-rejected
-//             bodies all leave the previous forecast byte-identical
+//   forecast  applyForecast: 200 + canonical body updates (the WMO codes
+//             included); non-200, empty, oversized (boundary at exactly
+//             BODY_MAX) and parse-rejected bodies all leave the previous
+//             forecast byte-identical
 //   city      searchCity query validation; applyCity 200/non-200/error-body
 //             discipline, previous record untouched on failure
 //   transport fetchForecast/searchCity drive the fake transport with the
@@ -69,7 +70,8 @@ bool sameCity(const weather::CityRecord &a, const weather::CityRecord &b) {
 const char *CANONICAL_BODY =
     "{\"daily\":{\"temperature_2m_max\":[12.4,11.1,10.2,9.8],"
     "\"temperature_2m_min\":[3.1,-2.5,4.05,1.2],"
-    "\"precipitation_probability_max\":[10,45,80,5]},"
+    "\"precipitation_probability_max\":[10,45,80,5],"
+    "\"weather_code\":[1,61,0,95]},"
     "\"utc_offset_seconds\":3600}";
 
 const char *CANONICAL_CITY =
@@ -85,19 +87,20 @@ int main(int argc, char **argv) {
 
   if (test == "urls") {
     // The exact composed forecast URL for the S6 default city, Celsius:
-    // the committed path builder supplies the query, the fetch layer adds
-    // scheme and host. The unit parameter appears ONLY in Fahrenheit mode.
+    // the committed path builder supplies the query (S8 adds weather_code
+    // to the daily arrays), the fetch layer adds scheme and host. The unit
+    // parameter appears ONLY in Fahrenheit mode.
     const weather::CityRecord city = weather::defaultCity();
     CHECK(weather_fetch::forecastUrl(city, weather::Unit::Celsius) ==
           "https://api.open-meteo.com/v1/forecast?latitude=37.382830"
           "&longitude=-5.973170&daily=temperature_2m_max,"
-          "temperature_2m_min,precipitation_probability_max&timezone=auto"
-          "&forecast_days=4");
+          "temperature_2m_min,precipitation_probability_max,weather_code"
+          "&timezone=auto&forecast_days=4");
     CHECK(weather_fetch::forecastUrl(city, weather::Unit::Fahrenheit) ==
           "https://api.open-meteo.com/v1/forecast?latitude=37.382830"
           "&longitude=-5.973170&daily=temperature_2m_max,"
-          "temperature_2m_min,precipitation_probability_max&timezone=auto"
-          "&forecast_days=4&temperature_unit=fahrenheit");
+          "temperature_2m_min,precipitation_probability_max,weather_code"
+          "&timezone=auto&forecast_days=4&temperature_unit=fahrenheit");
     // Geocoding: spaces, accents and an ampersand are percent-escaped; the
     // unreserved set (letters, digits, -._~, ASCII here) passes through.
     CHECK(weather_fetch::geocodeUrl("Madrid") ==
@@ -243,6 +246,11 @@ int main(int argc, char **argv) {
     CHECK(updated.tmin[1] == -25);
     CHECK(updated.prob[2] == 80);
     CHECK(updated.tmax[3] == 98);
+    // The S8 weather codes land with the same whole-record commit.
+    CHECK(updated.code[0] == 1);
+    CHECK(updated.code[1] == 61);
+    CHECK(updated.code[2] == 0);
+    CHECK(updated.code[3] == 95);
     // Rejection discipline: EVERY failure leaves the previous record
     // untouched, never a partial update.
     const weather::Forecast untouched = previous;

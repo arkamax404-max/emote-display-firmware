@@ -9,12 +9,17 @@
 // canvas — a 1 px vertical divider in column 32 and a 1 px horizontal
 // divider in row 32 in the muted ink, and the four cells (today top left,
 // +1 top right, +2 bottom left, +3 bottom right), each showing its
-// three-letter day label, the maximum at scale 2, the minimum at scale 1
-// and the precipitation probability as NN% at scale 1, all drawn through
-// the same 3x5 glyph table and text() helper the clock uses. Colors leave
-// this renderer raw 565; the pixel callback applies the shared brightness
-// helper panel::color() exactly like every idle_clock::draw call site, so
-// the whole screen dims with the panel setting. No Arduino/WiFi symbols.
+// three-letter day label with the precipitation probability NN%
+// right-aligned on the very same top row (S7), then the maximum at scale 2
+// and the minimum at scale 2 (same size; the maximum is the primary
+// figure), and the S8 8x8 icon for the day's WMO weather code beside the
+// temperature block when both figures fit. All text is drawn through the
+// same 3x5 glyph table and text() helper the clock uses; the icons use the
+// same plot discipline with a small row-byte table of their own. Colors
+// leave this renderer raw 565; the pixel callback applies the shared
+// brightness helper panel::color() exactly like every idle_clock::draw call
+// site, so the whole screen dims with the panel setting. No Arduino/WiFi
+// symbols.
 namespace weather_screen {
 
 // Geometry fixed by the spec (S1): the dividers cross at (32, 32); each
@@ -26,15 +31,19 @@ constexpr int CELL = 31;
 constexpr int RIGHT_X = 33;  // left edge of the two right-hand cells
 constexpr int BOTTOM_Y = 33; // top edge of the two bottom cells
 
-// Row offsets inside a cell: label y+0 (scale 1), maximum y+7 (scale 2),
-// minimum y+19 (scale 1), probability y+25 (scale 1). The last painted row
-// is y+29, one row short of the region end.
-constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19, DY_PROB = 25;
-constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 1, SCALE_PROB = 1;
+// Row offsets inside a cell (S7): label y+0 (scale 1) with the probability
+// right-aligned on that same row (the '%' ends at the cell's own edge,
+// column x0+30); maximum y+7 and minimum y+19, both at scale 2. The icon
+// (S8) occupies the last eight columns x0+23..x0+30 — the same right
+// anchor as the probability — and the vertical middle rows y0+14..y0+21.
+// The last painted row is y+28, one row short of the region end.
+constexpr int DY_LABEL = 0, DY_MAX = 7, DY_MIN = 19;
+constexpr int SCALE_LABEL = 1, SCALE_MAX = 2, SCALE_MIN = 2;
+constexpr int ICON_X = 23, ICON_Y = 14;
 
 // Inks: the dividers are the muted ink (S1); the cell palette mirrors the
-// clock — white headline maximum, blue minimum, amber probability, muted
-// day labels.
+// clock — white headline maximum, blue minimum, amber label row
+// probability, muted day labels.
 constexpr uint16_t INK_DIVIDER = idle_clock::MUTED;
 constexpr uint16_t INK_LABEL = idle_clock::MUTED;
 constexpr uint16_t INK_MAX = idle_clock::WHITE;
@@ -46,6 +55,39 @@ constexpr uint16_t INK_PROB = idle_clock::AMBER;
 // defined here and drawn by the same plot discipline: a top-left dot, a
 // bottom-right dot and the anti-diagonal between them.
 constexpr uint8_t PCT[5] = {5, 1, 2, 4, 5};
+
+// S8: the seven 8x8 icon bitmaps, one byte per row, bit 0x80 the leftmost
+// column, in the same style as the clock's string-row pattern tables. Each
+// icon reads at panel scale: the sun disc for clear, a sun behind a cloud,
+// a two-puff cloud, three staggered bars for fog, a cloud with falling
+// strokes for rain, with two grains for snow, and a bolt under the cloud
+// for the storm group (storms stay amber — the WMO grouping puts weather
+// that demands attention there).
+constexpr uint8_t ICONS[int(weather::Icon::Unknown)][8] = {
+    // clear: disc with N, S, E, W and four diagonal rays
+    {0x18, 0x5A, 0x3C, 0xFF, 0xFF, 0x3C, 0x5A, 0x18},
+    // partly cloudy: sun disc upper-left behind a cloud lower-right
+    {0x60, 0xF0, 0x6F, 0x3F, 0x3F, 0x1F, 0x00, 0x00},
+    // cloudy: cloud, flat base
+    {0x00, 0x00, 0x1E, 0x7E, 0xFF, 0xFF, 0x00, 0x00},
+    // fog: three staggered bars
+    {0x00, 0x00, 0x3F, 0x00, 0xFC, 0x00, 0x3F, 0x00},
+    // rain: cloud plus three diagonal downward strokes
+    {0x1E, 0x7E, 0xFF, 0xFF, 0x00, 0x49, 0x92, 0x49},
+    // snow: cloud plus two falling grains
+    {0x1E, 0x7E, 0xFF, 0xFF, 0x00, 0x66, 0x66, 0x00},
+    // storm: cloud plus a lightning stroke
+    {0x1E, 0x7E, 0xFF, 0xFF, 0x00, 0x0C, 0x18, 0x30},
+};
+constexpr uint16_t ICON_INK[int(weather::Icon::Unknown)] = {
+    idle_clock::AMBER, // clear
+    idle_clock::AMBER, // partly cloudy
+    idle_clock::WHITE, // cloudy
+    idle_clock::MUTED, // fog
+    idle_clock::BLUE,  // rain
+    idle_clock::WHITE, // snow
+    idle_clock::AMBER, // storm
+};
 
 // Truncation rule (T2 decision): a value that would not fit its 31 px cell
 // loses WHOLE trailing characters (never a mid-glyph cut) until it fits,
@@ -90,25 +132,49 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
   // Three-letter day label: HOY for today, then the weekday from the RTC.
   put(weather::dayLabel(index, calendar.tm_wday), DY_LABEL, SCALE_LABEL,
       INK_LABEL);
-  // The maximum is the headline value: scale 2, converted to the shown unit.
+  // S7: the probability shares the label row, right-aligned to the cell's
+  // own right edge — the '%' ends at column x0+30. Zero-padded two digits
+  // (100 keeps three); with probability <= 100 the field is at most "100%"
+  // (15 px), never truncated.
+  std::snprintf(buffer, sizeof buffer, "%02u",
+                static_cast<unsigned>(forecast.prob[index]));
+  const int digits = static_cast<int>(std::strlen(buffer));
+  const int left = x0 + CELL - detail::probabilityWidth(digits);
+  idle_clock::text(buffer, left, y0 + DY_LABEL, SCALE_LABEL, INK_PROB, plot);
+  const int px = left + 4 * digits;
+  for (int row = 0; row < 5; ++row)
+    for (int col = 0; col < 3; ++col)
+      if (PCT[row] & (4 >> col))
+        plot(px + col, y0 + DY_LABEL + row, INK_PROB);
+  // S7: both temperatures at scale 2 — the maximum is the headline value
+  // (white) and the minimum (blue) is the same size right below it.
   std::snprintf(buffer, sizeof buffer, "%d",
                 weather::roundedDegrees(weather::displayedTenths(
                     forecast.tmax[index], forecast.unit, shown)));
   put(buffer, DY_MAX, SCALE_MAX, INK_MAX);
+  const size_t maxChars = std::strlen(buffer);
   std::snprintf(buffer, sizeof buffer, "%d",
                 weather::roundedDegrees(weather::displayedTenths(
                     forecast.tmin[index], forecast.unit, shown)));
   put(buffer, DY_MIN, SCALE_MIN, INK_MIN);
-  // Zero-padded two digits (100 keeps three) plus the percent glyph; with
-  // probability <= 100 the field is at most "100%" (15 px), never truncated.
-  std::snprintf(buffer, sizeof buffer, "%02u",
-                static_cast<unsigned>(forecast.prob[index]));
-  put(buffer, DY_PROB, SCALE_PROB, INK_PROB);
-  const int px = x0 + 4 * static_cast<int>(std::strlen(buffer));
-  for (int row = 0; row < 5; ++row)
-    for (int col = 0; col < 3; ++col)
-      if (PCT[row] & (4 >> col))
-        plot(px + col, y0 + DY_PROB + row, INK_PROB);
+  const size_t minChars = std::strlen(buffer);
+  // S8: the 8x8 icon for the day's WMO code, right-anchored like the
+  // probability and vertically centred on the temperature block. It is
+  // drawn only when BOTH numbers fit beside it: at scale 2 a figure wider
+  // than two characters (any three-digit magnitude, or a two-digit one
+  // written with its sign, which is a glyph cell of its own) leaves fewer
+  // than two clear columns before the slot, so in that cell the icon is
+  // omitted and the FULL number is kept — a temperature is never truncated
+  // to make room for the icon. The unknown group (a code outside every
+  // group) has no bitmap and simply shows no icon.
+  const weather::Icon icon = weather::iconFor(forecast.code[index]);
+  if (maxChars <= 2 && minChars <= 2 && icon != weather::Icon::Unknown) {
+    const int which = static_cast<int>(icon);
+    for (int row = 0; row < 8; ++row)
+      for (int col = 0; col < 8; ++col)
+        if (ICONS[which][row] & (0x80 >> col))
+          plot(x0 + ICON_X + col, y0 + ICON_Y + row, ICON_INK[which]);
+  }
 }
 
 // The whole screen. A forecast that never parsed (no city, no network yet,

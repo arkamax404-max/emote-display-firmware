@@ -7,10 +7,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class WeatherTests(unittest.TestCase):
-    """T1 (S1, S2, S3, S5): the pure weather layer, host-tested without a
-    panel — bounded hand-written JSON extraction, unit conversion, the
-    micro-degree city record, day labels, alternation slots, fetch cadence
-    and the URL/JSON helpers."""
+    """T1 (S1, S2, S3, S5, S8): the pure weather layer, host-tested without a
+    panel — bounded hand-written JSON extraction of the four daily arrays,
+    unit conversion, the micro-degree city record, the WMO icon-group
+    mapping, day labels, alternation slots, fetch cadence and the URL/JSON
+    helpers."""
 
     def run_case(self, case):
         # Compile per rule so the initial missing implementation is visible
@@ -29,6 +30,7 @@ class WeatherTests(unittest.TestCase):
 
     def test_unit_codes_conversion_and_rounding(self): self.run_case("convert")
     def test_forecast_json_extraction_and_rejections(self): self.run_case("parse")
+    def test_wmo_code_maps_to_the_icon_groups(self): self.run_case("icon")
     def test_geocoding_extraction_and_name_clamp(self): self.run_case("city")
     def test_day_labels_from_the_weekday(self): self.run_case("labels")
     def test_alternation_slots_at_the_configured_durations(self): self.run_case("slot")
