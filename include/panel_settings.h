@@ -439,6 +439,29 @@ inline bool storeWeatherSettings(SettingsStore &store, uint8_t clockSeconds,
   return detail::storeUCharKeys(store, keys);
 }
 
+// T4b: the combined transaction of POST /config — the panel triple and the
+// weather triple in ONE atomic store over the same verified discipline, so
+// a failure never leaves the stored settings mixed across the two surfaces:
+// one snapshot, one rollback, read-back-only decisions, write order
+// brightness, clockformat, rgborder, clocksecs, weathersecs, units.
+inline bool storeAllSettings(SettingsStore &store, uint8_t brightnessPercent,
+                             idle_clock::ClockFormat clock,
+                             rgb_order::Order order, uint8_t clockSeconds,
+                             uint8_t weatherSeconds, weather::Unit unit) {
+  if (!panel::validBrightnessPercent(brightnessPercent)) return false;
+  if (!weather::validSeconds(clockSeconds) ||
+      !weather::validSeconds(weatherSeconds))
+    return false;
+  const detail::UCharKey keys[6] = {{"brightness", brightnessPercent},
+                                    {"clockformat",
+                                     idle_clock::clockFormatCode(clock)},
+                                    {"rgborder", rgb_order::orderCode(order)},
+                                    {"clocksecs", clockSeconds},
+                                    {"weathersecs", weatherSeconds},
+                                    {"units", weather::unitCode(unit)}};
+  return detail::storeUCharKeys(store, keys);
+}
+
 // T4a: the resolved city persists through the same verified transaction
 // discipline over its typed keys — write order `citylat`, `citylon`,
 // `cityname`, snapshot of all three (int32/int32/string), verified

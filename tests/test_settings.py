@@ -428,7 +428,10 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertEqual(source.count("panel::setBrightnessPercent("), 2)
         self.assertIn("loadPanelSettings();", source)
         self.assertEqual(source.count("storePanelSettings("), 2)
-        self.assertEqual(source.count("clockFormat);"), 1)
+        # T4b: the page render now carries the live weather values as well;
+        # the previous exact-arg pin ("clockFormat);") describe the retired
+        # four-argument call.
+        self.assertEqual(source.count("weatherUnit, clockSecs,"), 1)
         self.assertEqual(source.count("panel::brightnessScale())"), 1)
         self.assertLess(source.index("panel::brightnessScale())"),
                         source.index("panel::brightnessPercent())"))
@@ -440,8 +443,9 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertNotIn('"brightness"', reset)
         self.assertNotIn('"clockformat"', reset)
         self.assertNotIn('"rgborder"', reset)
-        # Every drawing consumer still scales through the one helper.
-        self.assertEqual(source.count("panel::color("), 5)
+        # Every drawing consumer still scales through the one helper. T4b
+        # adds the weather screen as the sixth call site.
+        self.assertEqual(source.count("panel::color("), 6)
         self.assertIn("panel::color(",
                       (ROOT / "include/firmware_version.h").read_text())
         self.assertIn("panel::color(",
@@ -464,11 +468,16 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertLess(body.index('"Unknown colour order."'),
                         body.index("if (storePanelSettings"))
         applied = body.split(
-            "if (storePanelSettings(brightness.percent, clock.format, order.value)) {",
+            "if (storePanelSettings(brightness.percent, clock.format, order.value,\n"
+            "                         clockDuration.seconds, weatherDuration.seconds,\n"
+            "                         unit.unit)) {",
             1)[1]
         applied = applied[:applied.index("\n  }")]
         for wired in ("panel::setBrightnessPercent(",
-                      "clockFormat = clock.format;", "presentDisplay();"):
+                      "clockFormat = clock.format;", "presentDisplay();",
+                      "clockSecs = clockDuration.seconds;",
+                      "weatherSecs = weatherDuration.seconds;",
+                      "weatherUnit = unit.unit;"):
             self.assertIn(wired, applied)
         # Restart only when the order value actually changed: the driver
         # fixes the pins at construction, so the board reboots to apply it —
@@ -481,9 +490,11 @@ class ConfigWiringTests(unittest.TestCase):
         self.assertIn("configSavedPage()", applied)
         # The store itself is the host-tested three-key transaction, adapted
         # onto Preferences with absence-distinguishing reads and no trusted
-        # put.
-        self.assertIn("panel_settings::storeSettings(store, percent, clock, order)",
-                      source)
+        # put. T4b: POST /config now stores all six keys as ONE verified
+        # transaction (the combined storeAllSettings over the same
+        # storeUCharKeys core), and the typed weather-city overrides are on
+        # the same store.
+        self.assertIn("panel_settings::storeAllSettings(", source)
         self.assertIn("panel_settings::SettingsStore", source)
         self.assertIn("preferences_.getUChar(key, 255)", source)
 

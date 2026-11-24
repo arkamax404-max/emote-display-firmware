@@ -22,6 +22,10 @@
 #include "rgb_order.h"
 #include "panel_settings.h"
 #include "wifi_credentials_reset.h"
+#include "weather.h"
+#include "weather_screen.h"
+#include "weather_fetch.h"
+#include <WiFiClientSecure.h>
 #include <DNSServer.h>
 #include <esp_system.h>
 #include <new> // placement construction of the panel after the order is known
@@ -79,7 +83,15 @@ static bool configSavePending = false;
 static bool configSurface = false;
 static std::string configBody;
 static size_t configBodyLength = 0;
-static uint32_t requestStarted = 0;
+// T4b city-search route state: the POST /config/city form lingers like the
+// settings POST and its body reuses the same bounded settings buffer. The
+// geocoding request runs synchronously inside the serving loop (the
+// request timeout check cannot fire mid-handler, so no exception is
+// needed) and may hold the loop for at most the transport budget —
+// documented, bounded, and never while a PNG body is being read.
+static bool citySavePending = false;
+static bool configBodyIsCity = false;
+static uint32_t requestStarted = 0;;
 static bool listening = false;
 static String ssid, password;
 
@@ -197,16 +209,54 @@ class ProvisionedSettingsStore : public panel_settings::SettingsStore {
     preferences_.putUChar(key, value);
   }
   void removeUChar(const char *key) override { preferences_.remove(key); }
+  // T4b typed adapters for the weather keys: the int32 micro-degrees and
+  // the clamped city-name string, written fire-and-verify exactly like the
+  // byte keys — the transaction's read-back decides, never the put value.
+  bool hasInt32(const char *key) override { return preferences_.isKey(key); }
+  bool readInt32(const char *key, int32_t &value) override {
+    if (!preferences_.isKey(key)) return false;
+    // This core's Preferences calls its int32 accessors getInt/putInt.
+    value = preferences_.getInt(key, 0);
+    return true;
+  }
+  void writeInt32(const char *key, int32_t value) override {
+    preferences_.putInt(key, value);
+  }
+  bool hasString(const char *key) override { return preferences_.isKey(key); }
+  bool readString(const char *key, std::string &value) override {
+    if (!preferences_.isKey(key)) return false;
+    value = std::string(preferences_.getString(key, "").c_str());
+    return true;
+  }
+  void writeString(const char *key, const std::string &value) override {
+    preferences_.putString(key, String(value.c_str()));
+  }
 
  private:
   Preferences &preferences_;
 };
 
 static bool storePanelSettings(uint8_t percent, idle_clock::ClockFormat clock,
-                               rgb_order::Order order) {
+                               rgb_order::Order order, uint8_t clockSeconds,
+                               uint8_t weatherSeconds, weather::Unit unit) {
   if (!preferences.begin("gentle", false)) return false;
   static ProvisionedSettingsStore store(preferences);
-  const bool verified = panel_settings::storeSettings(store, percent, clock, order);
+  // T4b: all six keys of POST /config persist as ONE verified transaction
+  // (the combined storeAllSettings), so a failure never leaves the stored
+  // settings mixed across the panel and weather surfaces.
+  const bool verified = panel_settings::storeAllSettings(
+      store, percent, clock, order, clockSeconds, weatherSeconds, unit);
+  preferences.end();
+  return verified;
+}
+
+// The resolved city persists through the committed THREE-key city
+// transaction (citylat/citylon/cityname, typed on the same store), also
+// verified by read-back; a failed store changes nothing.
+static bool storeWeatherCity(const weather::CityRecord &city) {
+  if (!preferences.begin("gentle", false)) return false;
+  static ProvisionedSettingsStore store(preferences);
+  const bool verified = panel_settings::storeCity(store, city);
   preferences.end();
   return verified;
 }
@@ -220,6 +270,124 @@ static void loadPanelSettings() {
     panel::setBrightnessPercent(storedBrightness);
   idle_clock::ClockFormat format = idle_clock::ClockFormat::H24;
   if (idle_clock::clockFormatFromCode(storedFormat, format)) clockFormat = format;
+}
+
+// T4b weather runtime state: the held forecast (RAM only), the committed
+// scheduler, and the settings loaded from storage below. A failed fetch
+// keeps the previous record; a board with nothing stored starts with the
+// Sevilla default city (S6) and the documented duration/unit defaults (S4).
+static weather::Forecast weatherForecast;
+static weather_fetch::Scheduler weatherScheduler;
+static weather::Unit weatherUnit = weather::Unit::Celsius;
+static uint8_t clockSecs = weather::CLOCK_SECONDS_DEFAULT;
+static uint8_t weatherSecs = weather::WEATHER_SECONDS_DEFAULT;
+static weather::CityRecord weatherCity;
+
+// T4b: the weather settings load — each key falls back to its documented
+// default through the committed loaders, including the whole Sevilla record
+// for an absent or unusable city, so a fresh board already has a usable city
+// and the clock never waits for a fetch.
+static void loadWeatherSettings() {
+  weatherCity = weather::defaultCity();
+  weatherUnit = weather::Unit::Celsius;
+  clockSecs = weather::CLOCK_SECONDS_DEFAULT;
+  weatherSecs = weather::WEATHER_SECONDS_DEFAULT;
+  if (!preferences.begin("gentle", true)) return;
+  const uint8_t storedClockSecs = preferences.getUChar("clocksecs", 255);
+  const uint8_t storedWeatherSecs = preferences.getUChar("weathersecs", 255);
+  const uint8_t storedUnits = preferences.getUChar("units", 255);
+  const bool storedCity = preferences.isKey("citylat") &&
+                          preferences.isKey("citylon") &&
+                          preferences.isKey("cityname");
+  const int32_t storedLat = preferences.getInt("citylat", 0);
+  const int32_t storedLon = preferences.getInt("citylon", 0);
+  const std::string storedName(preferences.getString("cityname", "").c_str());
+  preferences.end();
+  clockSecs = panel_settings::clockSecondsOrDefault(storedClockSecs);
+  weatherSecs = panel_settings::weatherSecondsOrDefault(storedWeatherSecs);
+  weatherUnit = panel_settings::unitOrDefault(storedUnits);
+  weatherCity = panel_settings::storedCityOrDefault(storedCity, storedLat,
+                                                    storedLon, storedName);
+}
+
+// T4b transport: one HTTPS GET per call over WiFiClientSecure with
+// setInsecure() — the S5 decision (no certificate validation; the risk is
+// accepted and documented). The parent's T4b budget TIGHTENS the T3
+// envelope: 5 s connect (the TLS handshake is part of connect) and 3 s of
+// read budget. WiFiClientSecure's setTimeout() takes WHOLE SECONDS on this
+// core, hence 3. The requests are exactly the committed URL builders' GETs
+// on port 443 and nothing else.
+class WeatherHttpsTransport : public weather_fetch::Transport {
+ public:
+  Response get(const char *host, const char *path) override {
+    Response response;
+    WiFiClientSecure secure;
+    secure.setInsecure();
+    secure.setTimeout(3);
+    if (!secure.connect(host, weather::HTTPS_PORT,
+                        USE_WEATHER_CONNECT_TIMEOUT_MS))
+      return response;
+    secure.printf(
+        "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: gentle-matrix\r\n"
+        "Connection: close\r\n\r\n",
+        path, host);
+    // Bounded raw read: at most twice the fetch body cap (an oversized body
+    // is then rejected by the committed application rules, never coerced)
+    // within the read budget.
+    std::string raw;
+    const uint32_t started = millis();
+    while (raw.size() < weather_fetch::BODY_MAX * 2 &&
+           static_cast<uint32_t>(millis() - started) <
+               USE_WEATHER_READ_TIMEOUT_MS) {
+      while (secure.available() &&
+             raw.size() < weather_fetch::BODY_MAX * 2)
+        raw.push_back(static_cast<char>(secure.read()));
+      if (!secure.connected() && !secure.available()) break;
+      delay(2);
+    }
+    if (raw.compare(0, 7, "HTTP/1.") != 0) return response;
+    const size_t statusStart = raw.find(' ');
+    if (statusStart == std::string::npos || statusStart + 4 > raw.size())
+      return response;
+    const std::string code = raw.substr(statusStart + 1, 3);
+    if (code.find_first_not_of("0123456789") != std::string::npos)
+      return response;
+    response.ok = true;
+    response.status = atoi(code.c_str());
+    size_t bodyOffset = 0;
+    if (weather::httpBodyStart(raw.data(), raw.size(), bodyOffset))
+      response.body = raw.substr(bodyOffset);
+    return response;
+  }
+
+ private:
+  static constexpr uint32_t USE_WEATHER_CONNECT_TIMEOUT_MS = 5000;
+  static constexpr uint32_t USE_WEATHER_READ_TIMEOUT_MS = 3000;
+};
+
+static WeatherHttpsTransport weatherTransport;
+
+// T4b weather fetch driver: the committed scheduler decides; a fetch runs
+// only outside the portal/AP window, only while the station is connected,
+// and never while a station request is in flight or a PNG body is being
+// read (the single station client makes `client` the in-flight marker). A
+// failed attempt keeps the previous forecast; the blocking budget is the
+// transport's 5 s + 3 s.
+static void pollWeather() {
+  if (portalActive) return;               // portal/AP mode owns the radio
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (client) return;                     // a station request is in flight
+  const weather_fetch::Action action =
+      weatherScheduler.tick(millis(), true, false);
+  if (action != weather_fetch::Action::Fetch) return;
+  weather::Forecast candidate;
+  if (weather_fetch::fetchForecast(weatherTransport, weatherCity, weatherUnit,
+                                   candidate)) {
+    weatherForecast = candidate;          // whole-record commit, unit synced
+    weatherScheduler.completed(millis(), true);
+  } else {
+    weatherScheduler.completed(millis(), false); // previous record kept
+  }
 }
 
 // DOWN long-press credential reset (T8, S6). The poller runs in every mode —
@@ -365,6 +533,21 @@ static void renderContent() {
     // timer, so every panel flips together; injectable in the native tests.
     const uint64_t epochMillis = uint64_t(epoch) * 1000 +
                                  uint64_t(esp_timer_get_time() / 1000) % 1000;
+    // T4b: the clock and the weather screen alternate over the ABSOLUTE
+    // epoch seconds (the same drift-free absolute base the title band
+    // uses), with the configured durations; the weather screen shows only
+    // when a forecast is held in RAM AND not stale. When it is not shown,
+    // the clock render below is byte for byte exactly as before - this
+    // block is the only difference on this path.
+    if (weatherForecast.valid && !weatherScheduler.stale(millis()) &&
+        weather::slotAt(static_cast<uint64_t>(epoch), clockSecs,
+                        weatherSecs) == weather::Slot::Weather) {
+      weather_screen::draw(weatherForecast, weatherUnit, calendar,
+                           [](int x, int y, uint16_t color) {
+        matrix.drawPixel(x, y, panel::color(color));
+      });
+      return;
+    }
     idle_clock::draw(calendar, animationTick, epochMillis,
                      clockState.sessionTitle(millis()),
                      [](int x, int y, uint16_t color) {
@@ -886,19 +1069,23 @@ static void replyHtml(int code, const std::string &body) {
 // --- S8 (T13): the LAN settings routes on the station server -------------
 
 // The settings page with the live values: one render helper for the GET
-// reply and for every POST rejection.
+// reply and for every POST rejection, now carrying the T4a weather values
+// (durations, unit and the resolved city) preselected.
 static std::string configPageWithError(const std::string &error) {
   return panel_settings::configPage(panel::brightnessPercent(), clockFormat,
-                                    channelOrder, error);
+                                    channelOrder, weatherUnit, clockSecs,
+                                    weatherSecs, weatherCity.name, error);
 }
 
-// POST /config application: parse + review, then persist (read-back
-// verified, rollback discipline like the credential store), then apply
-// live. A rejected value or a malformed body re-renders the page with the
-// reason and changes nothing; the runtime state only moves after the store
-// verified. Brightness and clock format apply immediately; the channel
-// order takes effect only through a restart, and ONLY when the value
-// actually changed — the driver fixes the pins at construction, so saving
+// POST /config application (T4b): parse + review of all six values, then
+// ONE verified store across them all (the combined storeAllSettings, so a
+// failure never leaves the stored settings mixed across the panel and
+// weather surfaces), then the live application. A rejected value or a
+// malformed body re-renders the page with the reason and changes nothing;
+// the runtime state only moves after the store verified. Brightness, clock
+// format, the durations and the unit apply immediately; the channel order
+// takes effect only through a restart, and ONLY when the value actually
+// changed — the driver fixes the pins at construction, so saving
 // the same value again must not reboot the board.
 static void applyConfigSave() {
   const panel_settings::SettingsFields fields =
@@ -909,19 +1096,33 @@ static void applyConfigSave() {
       panel_settings::reviewClock(fields.clock);
   const panel_settings::OrderChoice order =
       panel_settings::reviewOrder(fields.order);
+  const panel_settings::SecondsChoice clockDuration =
+      panel_settings::reviewSeconds(fields.clocksecs);
+  const panel_settings::SecondsChoice weatherDuration =
+      panel_settings::reviewSeconds(fields.weathersecs);
+  const panel_settings::UnitChoice unit =
+      panel_settings::reviewUnits(fields.units);
   const char *error = !fields.ok
       ? "Malformed form data. Reload the page and try again."
       : !brightness.ok ? "Unknown brightness value."
       : !clock.ok ? "Unknown clock format."
       : !order.ok ? "Unknown colour order."
+      : !clockDuration.ok ? "Unknown clock duration."
+      : !weatherDuration.ok ? "Unknown weather duration."
+      : !unit.ok ? "Unknown temperature unit."
       : nullptr;
   if (error) {
     replyHtml(400, configPageWithError(error));
     return;
   }
-  if (storePanelSettings(brightness.percent, clock.format, order.value)) {
+  if (storePanelSettings(brightness.percent, clock.format, order.value,
+                         clockDuration.seconds, weatherDuration.seconds,
+                         unit.unit)) {
     panel::setBrightnessPercent(brightness.percent);
     clockFormat = clock.format;
+    clockSecs = clockDuration.seconds;
+    weatherSecs = weatherDuration.seconds;
+    weatherUnit = unit.unit;
     presentDisplay(); // live application: this frame already uses the values
     if (order.value != channelOrder) {
       replyHtml(200, panel_settings::configSavedPage(true));
@@ -958,6 +1159,12 @@ static bool handleConfigRequestLine() {
     replyHtml(200, configPageWithError(""));
     return true;
   }
+  if (route == panel_settings::Route::CitySave) {
+    // T4b: the city-search submission lingers until its complete header
+    // block exactly like the settings POST.
+    citySavePending = true;
+    return false;
+  }
   configSavePending = true;
   return false;
 }
@@ -982,7 +1189,64 @@ static void beginConfigSave() {
   }
   configBody.clear();
   configBodyLength = static_cast<size_t>(contentLength);
+  configBodyIsCity = false;
   readingBody = true;
+}
+
+// T4b: the bounded city-search intake - exactly the same Content-Length
+// rules as the settings POST (the shared bounded buffer, never the PNG
+// path); the geocoding request then runs synchronously inside the serving
+// loop. It is a user-initiated search, never automatic, and the loop may
+// hold for at most the transport budget (5 s connect + 3 s read).
+static void beginCitySave() {
+  const long contentLength = panel_settings::parseContentLength(headers);
+  if (contentLength < 0) {
+    replyHtml(411, configPageWithError("Missing content length."));
+    return;
+  }
+  if (contentLength > static_cast<long>(panel_settings::CONFIG_BODY_MAX)) {
+    replyHtml(413, configPageWithError("Form data too large."));
+    return;
+  }
+  if (contentLength == 0) {
+    replyHtml(400, configPageWithError("Empty form."));
+    return;
+  }
+  configBody.clear();
+  configBodyLength = static_cast<size_t>(contentLength);
+  configBodyIsCity = true;
+  readingBody = true;
+}
+
+// T4b city search application: the committed review rejects an empty or
+// oversized name BEFORE any request could occur; the request goes to the
+// committed geocoding host and its answer through the committed intake
+// (status/size/parse discipline and the UTF-8-safe name clamp). A failed
+// or invalid search changes NOTHING - no stored key, no live record - and
+// the page says why; only a VERIFIED city store moves the live record.
+static void applyCitySave() {
+  const panel_settings::CitySearchFields fields =
+      panel_settings::parseCityForm(configBody.data(), configBody.size());
+  if (!fields.ok || !panel_settings::reviewCitySearch(fields.city)) {
+    replyHtml(400, configPageWithError(
+        "Enter a city name of at most 64 characters."));
+    return;
+  }
+  const std::string geocodeRequestPath = weather::geocodePath(fields.city);
+  const weather_fetch::Transport::Response geocodeResponse =
+      weatherTransport.get(weather::GEOCODE_HOST, geocodeRequestPath.c_str());
+  weather::CityRecord resolved;
+  if (!panel_settings::cityFromResponse(geocodeResponse, resolved)) {
+    replyHtml(400, configPageWithError(
+        "Could not resolve that city. Check the name and try again."));
+    return;
+  }
+  if (!storeWeatherCity(resolved)) {
+    replyHtml(500, configPageWithError("Storage failed. Try again."));
+    return;
+  }
+  weatherCity = resolved; // live record only after the verified store
+  replyHtml(200, configPageWithError(""));
 }
 
 // One active request, no frame queue. Parsing is bounded and yields each loop.
@@ -1030,6 +1294,13 @@ static void pollHttp() {
         beginConfigSave();
         return;
       }
+      if (citySavePending) {
+        // A pending POST /config/city (T4b): the full header block is here
+        // now; the receiver parser never sees this request either.
+        citySavePending = false;
+        beginCitySave();
+        return;
+      }
       const int status = receiver::parseHeaders(headers, request);
       if (status == 400 && request.hasName && !request.nameValid) {
         // Distinct parser result for an invalid or duplicate
@@ -1055,6 +1326,13 @@ static void pollHttp() {
             ",\"serialRxImages\":" + String(serialDiag.imageCount()) +
             ",\"serialRxControls\":" + String(serialDiag.controlCount()) +
             ",\"serialRxRejected\":" + String(serialDiag.rejectedCount()) +
+            // Additive T4 weather fields (S1): whether a forecast is
+            // currently held and the resolved city name (JSON-escaped; the
+            // name is public data). No existing field changes meaning.
+            ",\"weather\":" +
+            String(weatherForecast.valid ? "true" : "false") +
+            ",\"city\":\"" + weather::jsonEscape(weatherCity.name).c_str() +
+            "\"" +
             // Additive T4 portal identity field: the portal serves its own
             // health with "portal":true; nothing secret is ever included.
             ",\"portal\":false}"); return;
@@ -1090,7 +1368,8 @@ static void pollHttp() {
       // completely disjoint from the PNG payload path.
       configBody.push_back(static_cast<char>(value));
       if (configBody.size() == configBodyLength) {
-        applyConfigSave();
+        if (configBodyIsCity) applyCitySave();
+        else applyConfigSave();
         return;
       }
     } else {
@@ -1320,6 +1599,9 @@ void setup() {
   // S9/S10: persisted panel settings — each verified, an absent or
   // out-of-range value falls back to its default (nothing is applied then).
   loadPanelSettings();
+  // T4b: the weather settings and the city, with the committed defaults
+  // (Sevilla included) whenever storage has nothing usable.
+  loadWeatherSettings();
   preferences.begin("gentle", true);
   ssid = preferences.getString("ssid", "");
   password = preferences.getString("password", "");
@@ -1369,6 +1651,7 @@ void loop() {
   pollCredentialsReset();
   pollWifi();
   pollPortal();
+  pollWeather();
   pollClock();
   // Lease expiry is also evaluated before every ownership decision; this
   // loop-level check keeps an abandoned reservation from outliving silence.
