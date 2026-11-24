@@ -20,7 +20,7 @@ int main() {
   firmware::drawVersion(display, "READY", "SEND PNG");
   const std::vector<std::string> expected = {
       "size:1", "color:" + std::to_string(panel::color(display.color565(128, 128, 128))),
-      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.3.2"};
+      "cursor:2," + std::to_string(44 + panel::TOP_OFFSET), "v1.4.0"};
   assert(display.calls == expected);
   // The footer must fit the 64 px panel width at 6 px per cell: at most 10
   // ASCII cells starting at x=2, whatever the version string happens to be.
