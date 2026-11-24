@@ -341,8 +341,23 @@ int main(int argc, char **argv) {
     };
     render(idle_clock::ClockFormat::H24, h24);
     render(idle_clock::ClockFormat::H12, h12);
-    CHECK(h12[9 * 64 + 12] == idle_clock::WHITE);  // '9' first row, scale 4.
-    CHECK(h12[28 * 64 + 12] == idle_clock::WHITE); // hour baseline row is inked.
+    // Right alignment: a single-digit hour keeps the right edge a two-digit
+    // hour has, so it hugs the colon instead of leaving the gap on its right.
+    auto bandEdge = [](const std::array<uint16_t, 64 * 64> &img, bool rightmost) {
+      int edge = rightmost ? -1 : 64;
+      for (int y = 9; y <= 28; ++y) {
+        for (int x = 12; x < 46; ++x) {
+          if (img[y * 64 + x] != idle_clock::WHITE) continue;
+          if (rightmost) { if (x > edge) edge = x; }
+          else if (x < edge) edge = x;
+        }
+      }
+      return edge;
+    };
+    CHECK(bandEdge(h24, false) < 28);   // "09" starts in the left cell.
+    CHECK(bandEdge(h12, false) >= 28);  // "9" starts in the right cell.
+    CHECK(bandEdge(h12, true) == bandEdge(h24, true)); // same right edge.
+    CHECK(h12[9 * 64 + 12] == 0);       // the old left cell is now empty.
     CHECK(h12[24 * 64 + 47] == idle_clock::MUTED); // 'A' row0 010.
     CHECK(h12[26 * 64 + 46] == idle_clock::MUTED); // 'A' row2 111.
     CHECK(h12[24 * 64 + 50] == idle_clock::MUTED); // 'M' row0 101.
@@ -379,17 +394,19 @@ int main(int argc, char **argv) {
       CHECK(hourBand || meridiem);
     }
     CHECK(moved);
-    // The 12 h hours never zero-pad: at 9 o'clock the H24 "09" lights the
-    // second digit cell (x28..39) while the H12 "9" leaves it empty.
+    // The 12 h hours never zero-pad, and a single digit is right aligned: at
+    // 9 o'clock H24 draws "09" across both cells, while H12 draws "9" in
+    // the right cell and leaves the left one empty, hugging the colon.
     calendar.tm_hour = 9;
     render(idle_clock::ClockFormat::H24, h24);
     render(idle_clock::ClockFormat::H12, h12);
-    bool padded = false, spacer = true;
-    for (int x = 28; x <= 39; ++x) {
-      padded |= h24[9 * 64 + x] != 0;
-      spacer &= h12[9 * 64 + x] == 0;
+    bool leftInkedInH24 = false, leftEmptyInH12 = true, rightInkedInH12 = false;
+    for (int x = 12; x <= 27; ++x) {
+      leftInkedInH24 |= h24[9 * 64 + x] != 0;
+      leftEmptyInH12 &= h12[9 * 64 + x] == 0;
     }
-    CHECK(padded && spacer);
+    for (int x = 28; x <= 43; ++x) rightInkedInH12 |= h12[9 * 64 + x] != 0;
+    CHECK(leftInkedInH24 && leftEmptyInH12 && rightInkedInH12);
   } else return 2;
   std::cout << "OK\n";
 }

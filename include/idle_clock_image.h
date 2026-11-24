@@ -89,6 +89,16 @@ void text(const char *value, int x, int y, int scale, uint16_t color, Pixel pixe
 }
 
 
+// S9 follow-up: an hour of a single digit (only possible in H12, where the
+// labels are unpadded) is shifted one cell to the right so it keeps the right
+// edge a two-digit hour has: it hugs the colon instead of leaving the gap on
+// its right. Two-digit hours, and therefore every H24 render, are unchanged.
+inline int hourX(const char *hours, int baseX, int scale) {
+  const size_t cells = std::strlen(hours);
+  if (cells >= 2) return baseX;
+  return baseX + static_cast<int>((2 - cells) * 4 * scale);
+}
+
 // Full 64-row canvas at y0; the renderer no longer relies on a panel offset.
 // S9: `format` selects the clock display; H24 (the default) renders byte
 // for byte what today's renderer renders. In H12 the hours go 12, 1..11
@@ -107,7 +117,7 @@ void draw(const std::tm &calendar, uint64_t animationTick, Pixel pixel,
   for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) plot(x, y, 0);
   const Labels value = labels(calendar, format);
   text(value.date, 12, 1, 1, MUTED, plot);
-  text(value.hours, 12, 9, 4, WHITE, plot);
+  text(value.hours, hourX(value.hours, 12, 4), 9, 4, WHITE, plot);
   if (format == ClockFormat::H12)
     text(value.meridiem, 46, 24, 1, MUTED, plot);
   text(value.minutes, 12, 31, 4, BLUE, plot);
