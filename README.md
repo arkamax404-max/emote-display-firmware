@@ -17,12 +17,12 @@ Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen 
 
 ## Versión publicada
 
-La release [**v1.3.0**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.3.0) publica el firmware que corre hoy la placa: recuperación sin cables mediante portal cautivo (solo cuando no hay un ordenador por USB), selector de redes, página de ajustes en la red (`/config`), brillo en ejecución (10-80 %, por defecto 30 %), reloj 12/24 h con `AM`/`PM`, orden de canales HUB75 seleccionable y reset de credenciales con una pulsación larga de DOWN.
+La release [**v1.3.1**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.3.1) publica el firmware que corre hoy la placa: recuperación sin cables mediante portal cautivo (solo cuando no hay un ordenador por USB), selector de redes, página de ajustes en la red (`/config`), brillo en ejecución (10-80 %, por defecto 30 %), reloj 12/24 h con `AM`/`PM` y hora de un dígito alineada a la derecha, orden de canales HUB75 seleccionable y reset de credenciales con una pulsación larga de DOWN.
 
 | Asset | Contenido |
 | --- | --- |
-| [`firmware-panel-config.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.0/firmware-panel-config.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 1 856 000 bytes, SHA256 `9379dea31a1b918563431f83485f6c9a9188e64580031b2f978137d7467bd234`, 3 625 bloques, familia `0xc47e5767` |
-| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.0/manifest.json) | Procedencia reproducible: commit de origen, binario y su hash, comandos exactos, herramienta, validación del UF2 y la grabación realizada |
+| [`firmware-panel-config.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.1/firmware-panel-config.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 1 856 512 bytes, SHA256 `028fbda463eb81d00f2b45e0fd2048ce8c8ba84d99dffb2873e0955d5cad3343`, 3 626 bloques, familia `0xc47e5767` |
+| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.3.1/manifest.json) | Procedencia reproducible: commit de origen, binario y su hash, comandos exactos, herramienta, validación del UF2 y la grabación realizada |
 
 Para grabarla: doble reset para entrar en TinyUF2, copia el `.uf2` al volumen `MATRXS3BOOT` y espera a que el bootloader reinicie. No hay que borrar nada ni tocar `CURRENT.UF2`. La copia escribe solo la partición de aplicación, así que el Wi-Fi, la orientación, el brillo y el orden de canales guardados se conservan.
 
