@@ -11,24 +11,32 @@ network can confirm.
 
 ## The screen
 
-- The 64x64 canvas is split by a **1 px vertical divider in column 32** and a **1 px horizontal
-  divider in row 32**, both drawn the full length of the canvas in the muted ink, crossing at
-  (32, 32). Each cell owns a 31x31 region, so the spare column/row keeps every glyph clear of
-  the divider even when a value fills its cell.
+- The canvas keeps **one pixel of margin on the left (column 0) and on the top (row 0)**, and there
+  are **no divider lines**: the four cells are separated by whitespace alone. Each cell owns a
+  30x30 region with origins (1,1), (33,1), (1,33) and (33,33), so the bottom cell ends at row 62
+  and the panel keeps a free row below it; the right border mirrors the left one.
 - The four cells: **today top left, +1 top right, +2 bottom left, +3 bottom right**. Each cell
   shows, top to bottom:
   - the three-letter day label — `HOY` for today, then the weekday (`LUN`..`DOM`) taken from
     the RTC calendar for the following days,
   - the day's **maximum temperature** in large glyphs (3x5 glyph table at scale 2), the shared
     clock palette (white),
-  - the **minimum temperature** at scale 1 (blue),
-  - the **precipitation probability** as `NN%` at scale 1 (amber; `00%` for zero, `100%` keeps
-    three digits — the percent sign is a locally defined 3x5 glyph, because the shared clock
-    glyph table has none and must not change).
+  - the **minimum temperature** at scale 2, the same size as the maximum,
+  - the **precipitation probability** as `NN%` at scale 1, on the same row as the day label and
+    right-aligned against the cell edge. It is **not drawn at all when the probability is zero**,
+    and otherwise its ink follows the value: white from 1 to 30, cyan from 31 to 60 and intense
+    blue from 61 to 100. The percent sign is a locally defined 3x5 glyph, because the shared
+    clock glyph table has none and must not change.
+  - the **day label** in intense violet, which is what identifies each cell.
+  - an **8x8 icon** derived from the day's weather code, centred in the space the figures leave
+    and dropped when a figure needs three signless digits, so a digit is never cut for a picture.
 - Times are stored in tenths of a degree and rendered as rounded integers (half away from
   zero), converted between Celsius and Fahrenheit with exact integer rules when the shown unit
-  differs from the unit the forecast was fetched in. No icons, no charts — per the user
-  decision, temperatures and rain probability only.
+  differs from the unit the forecast was fetched in. **Colour carries the temperature**: intense
+  blue below zero, cyan to 14, green to 24, amber to 37 and red from 38, always chosen from the
+  Celsius equivalent with a single rounding so a given weather looks the same in C and in F. A
+  negative figure keeps its minus sign while that leaves it at two glyphs, so -1 to -9 print it
+  and -10 and below rely on the colour.
 - Every pixel goes through the same shared brightness helper (`panel::color`) as the clock, the
   messages and the received PNGs, so the screen dims with the panel brightness like everything
   else.
@@ -157,10 +165,11 @@ Two additive fields only; every existing field keeps its meaning:
 
 Verified (host suite, current at commit 2b21a71 + the T4b wiring):
 
-- 370/370 host tests, of which 100 cover this feature across four suites: the pure layer
+- 397/398 host tests (398 with the optional cross-repository decoder test), of which 100 cover this feature across four suites: the pure layer
   (`weather.h`: extraction, conversion, city record, labels, slots, cadence), the renderer
-  (`weather_screen.h`: divider geometry, cell layout, cell isolation, truncation, units,
-  brightness pass-through on a full-canvas expected image), the fetch layer
+  (`weather_screen.h`: cell geometry and margins, cell isolation, icon slot and drop rule,
+  temperature and probability colour bands, units, brightness pass-through on a full-canvas
+  expected image), the fetch layer
   (`weather_fetch.h`: URLs, cadence state machine, staleness, rejection discipline over a fake
   transport) and the firmware wiring (structural pins over `main.cpp`: guards, budget, six-key
   transaction, alternation gate in front of the untouched clock).
@@ -178,8 +187,10 @@ Verified (host suite, current at commit 2b21a71 + the T4b wiring):
 
 Not verified — needs the physical panel and the live network:
 
-- The on-glass readability of the grid: the muted divider contrast, the cell layout, the size-2
-  maximum vs the size-1 minimum and probability, the truncation of extreme values on glass.
+- The on-glass readability of the grid: the violet day label set against the temperature bands,
+  the white/cyan/blue probability bands against the same cyan and intense blue the temperature
+  scale already uses (only their position separates the two meanings), the legibility of the
+  one-pixel margins at distance, and the size-2 figures next to the 8x8 icons.
 - The real TLS timing against `api.open-meteo.com` (the 5 s/3 s budgets are reasoned bounds, not
   measurements) and the loop-stall feel during a worst-case fetch.
 - The city search in a real browser, end to end, and the NVS survival of `citylat`/`citylon`/

@@ -7,11 +7,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class WeatherScreenTests(unittest.TestCase):
-    """T2 (S1, S3, S7-S13): the weather screen renderer, host-tested on
+    """T2 (S1, S3, S7-S15): the weather screen renderer, host-tested on
     a 64x64 canvas — the four 30x30 cells (S12/S13: nothing in columns
     0/63 nor rows 0/63, each border keeping a one-pixel margin), with per
     S7 the label and probability
-    sharing the top row, the probability at the cell's own edge, both
+    sharing the top row, the probability at the cell's own edge (hidden
+    at zero, otherwise inked white 1..30, cyan 31..60, intense blue
+    61..100, S15) on a violet day label (S15), both
     temperatures at scale 2, the S8 icon centred at draw time in the
     free space its wider figure leaves, the S9 absence of
     separator lines, the S9 sign-by-colour rule (negative figures in

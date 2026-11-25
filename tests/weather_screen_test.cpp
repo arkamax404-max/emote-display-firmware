@@ -8,11 +8,12 @@
 // is one invocation: weather_screen_test <case>; OK + exit 0 or
 // "line N: condition" on stderr + exit 1.
 //
-// The 8x8 icon bitmaps are pinned HERE as raw bytes, and the intense blue
-// of the negative figures is pinned HERE as a raw 565 word — the
-// exact-image match therefore proves the renderer draws precisely these
-// bitmaps and precisely this ink, not merely that the used constant
-// matches itself.
+// The 8x8 icon bitmaps are pinned HERE as raw bytes, and the intense
+// blue of the negative figures together with every S15 ink (the violet
+// day label and the three probability bands) are pinned HERE as raw
+// 565 words — the exact-image match therefore proves the renderer draws
+// precisely these bitmaps and precisely these inks, not merely that the
+// used constants match themselves.
 //
 // Cases (case id "dividers" now proves the S9 absence of separators):
 //   dividers  NO separator anywhere: row 32 and column 32 are empty in
@@ -25,7 +26,11 @@
 //             zero-padded NN% probabilities parked at the cell's right
 //             edge exactly on the label row (S7); negative figures in
 //             intense blue without a minus glyph, positive minimum muted
-//             (S9)
+//             (S9); the zero probability draws NOTHING and the drawn
+//             ink follows the S15 band
+//   rain      S15 probability rule at every boundary on both sides:
+//             0 draws nothing (no digits, no '%'), 1..30 white,
+//             31..60 cyan, 61..100 intense blue
 //   icons     S7/S8/S9 layout proofs: both temperatures the same height;
 //             the icon slot 4 px further left, never touching the figures;
 //             inked only when both figures fit AND the WMO code maps;
@@ -132,7 +137,16 @@ constexpr uint16_t PINNED_COOL = 0x55FD; // 0..14: cyan
 constexpr uint16_t PINNED_MILD = 0x4648; // 15..24: green
 constexpr uint16_t PINNED_WARM = 0xFDE0; // 25..37: amber
 constexpr uint16_t PINNED_HOT  = 0xF800; // 38 and above: red
-constexpr uint16_t PINNED_PROB = 0x95B4; // probability: muted neutral (S10)
+constexpr uint16_t PINNED_VIOLET = 0x91FF; // day label: intense violet (S15)
+constexpr uint16_t PINNED_PROB_WHITE = 0xF79B;   // 1..30: white (S15)
+constexpr uint16_t PINNED_PROB_CYAN = 0x55FD;    // 31..60: cyan (S15)
+constexpr uint16_t PINNED_PROB_INTENSE = 0x421F; // 61..100: intense blue
+
+uint16_t pinProbInk(uint8_t probability) {
+  if (probability <= 30) return PINNED_PROB_WHITE;
+  if (probability <= 60) return PINNED_PROB_CYAN;
+  return PINNED_PROB_INTENSE;
+}
 
 uint16_t pinInk(int celsiusDegrees) {
   if (celsiusDegrees < 0) return PINNED_COLD;
@@ -180,17 +194,22 @@ void expectCell(const Region &r, const weather::Forecast &f, int index,
   // the wider figure and the cell's right edge) spans the vertical middle
   // rows (y0+14..y0+21).
   idle_clock::text(weather::dayLabel(static_cast<size_t>(index), wday), r.x0,
-                   r.y0 + 0, 1, idle_clock::MUTED, expPixel);
-  const std::string digits = probText(f.prob[index]);
-  const int left = r.x0 + weather_screen::CELL_W -
-                   (4 * (static_cast<int>(digits.size()) + 1) - 1);
-  idle_clock::text(digits.c_str(), left, r.y0 + 0, 1, PINNED_PROB,
-                   expPixel);
-  const int px = left + 4 * static_cast<int>(digits.size());
-  for (int row = 0; row < 5; ++row)
-    for (int col = 0; col < 3; ++col)
-      if (weather_screen::PCT[row] & (4 >> col))
-        expPixel(px + col, r.y0 + 0 + row, PINNED_PROB);
+                   r.y0 + 0, 1, PINNED_VIOLET, expPixel);
+  // S15: not a pixel of probability is drawn at zero — the whole right
+  // side of the label row stays empty; drawn, the ink follows the
+  // probability's own band.
+  if (f.prob[index] != 0) {
+    const std::string digits = probText(f.prob[index]);
+    const int left = r.x0 + weather_screen::CELL_W -
+                     (4 * (static_cast<int>(digits.size()) + 1) - 1);
+    const uint16_t probInk = pinProbInk(f.prob[index]);
+    idle_clock::text(digits.c_str(), left, r.y0 + 0, 1, probInk, expPixel);
+    const int px = left + 4 * static_cast<int>(digits.size());
+    for (int row = 0; row < 5; ++row)
+      for (int col = 0; col < 3; ++col)
+        if (weather_screen::PCT[row] & (4 >> col))
+          expPixel(px + col, r.y0 + 0 + row, probInk);
+  }
 
   // S10: the band ink encodes the temperature; S11: the minus glyph
   // survives only while the figure stays two glyphs.
@@ -271,15 +290,7 @@ bool slotHasInk(const Canvas &c, int index, int from = 19, int to = 26) {
   return false;
 }
 
-// The rightmost painted column of one colour inside the cell's region.
-int rightmostOf(const Canvas &c, const Region &r, uint16_t color) {
-  for (int x = r.x0 + REGION_W - 1; x >= r.x0; --x)
-    for (int y = r.y0; y < r.y0 + REGION_H; ++y)
-      if (c[y * 64 + x] == color) return x;
-  return -1;
-}
-
-// The rightmost column of ANY non-sentinel pixel within one row band of
+// The rightmost painted column of ANY non-sentinel pixel within one row band of
 // the cell (used for digit-width comparisons).
 int rightmostInkInBand(const Canvas &c, const Region &r, int dy, int rowspan) {
   int rightmost = -1;
@@ -526,8 +537,9 @@ int main(int argc, char **argv) {
           CHECK(canvas[y * 64 + x] == SENTINEL); // gap left of the icon
     }
   } else if (test == "values") {
-    // Two-digit, three-digit, negative and zero temperatures; probabilities
-    // 0 (as 00%), single digit (07%) and three digits (100%). The negative
+    // Two-digit, three-digit, negative and zero temperatures; the S15
+    // probability rule itself: 0 draws NOTHING (cell 0), one digit (07%)
+    // and three digits (100%). The negative
     // minimum (-40) is signless and COLD; the negative maximum (-5) is
     // SIGNED per S11, in the cold ink; the band ink is the value itself.
     const int16_t tmax[4] = {253, 1000, -52, 0};
@@ -550,16 +562,27 @@ int main(int argc, char **argv) {
     CHECK(bandHas(canvas, ORIGIN[2], 19, 10, PINNED_COLD));
     CHECK(bandHas(canvas, ORIGIN[3], 7, 10, PINNED_COOL));
     CHECK(bandHas(canvas, ORIGIN[3], 19, 10, PINNED_HOT));
-    // The label row keeps its muted day labels and the NEUTRAL probability
-    // (S10: no longer amber) at the cell's right edge on row 0 only.
+    // The label row: violet day labels (S15, the intense violet 0x91FF
+    // pinned raw above); the ZERO probability draws NOTHING (cell 0: the
+    // whole right side of the label row, past the 11 px "MAR" label, is
+    // empty), the other three right-aligned on the cell's edge in the
+    // probability's own band ink (7 -> white, 100 -> intense blue,
+    // 55 -> cyan) — including its "no digits, no '%'" absence
+    // (tmax/tmin probes below already scanned no amber here).
     for (int i = 0; i < 4; ++i) {
-      CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::MUTED));
-      CHECK(bandHas(canvas, ORIGIN[i], 0, 5, PINNED_PROB));
-      CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) == ORIGIN[i].x0 + 29);
+      CHECK(bandHas(canvas, ORIGIN[i], 0, 5, PINNED_VIOLET));
       for (int y = ORIGIN[i].y0 + 22; y < ORIGIN[i].y0 + REGION_H; ++y)
         for (int x = ORIGIN[i].x0; x < ORIGIN[i].x0 + REGION_W; ++x)
           CHECK(canvas[y * 64 + x] != idle_clock::AMBER);
     }
+    CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_WHITE));
+    CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_CYAN));
+    CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_INTENSE));
+    CHECK(rightmostInkInBand(canvas, ORIGIN[0], 0, 5) == ORIGIN[0].x0 + 9); // "HOY" ends at x0+9 (the Y glyph never paints its third col)
+    CHECK(bandHas(canvas, ORIGIN[1], 0, 5, PINNED_PROB_WHITE));
+    CHECK(rightmostInkInBand(canvas, ORIGIN[1], 0, 5) == ORIGIN[1].x0 + 29);
+    CHECK(bandHas(canvas, ORIGIN[2], 0, 5, PINNED_PROB_INTENSE));
+    CHECK(bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_CYAN));
     // S11: cell 2's -5 prints its sign — the dash glyph occupies scaled
     // rows y0+7+4..y0+7+5 at columns x0..x0+5, and nothing sits above it
     // in the first glyph cell (a digit would start at the top).
@@ -572,6 +595,60 @@ int main(int argc, char **argv) {
     // icon rows so the fog icon's own ink cannot masquerade as a digit.
     CHECK(rightmostInkInBand(canvas, ORIGIN[2], 7, 7) ==
           ORIGIN[2].x0 + 13);
+  } else if (test == "rain") {
+    // S15 probability rule pinned at every boundary on BOTH sides of
+    // every threshold: {0, 1, 30, 31} in the first render and {60, 61,
+    // 100, 0} in the second — zero never draws a pixel (no digits, no
+    // '%'), 1..30 is white, 31..60 cyan and 61..100 intense blue; the
+    // label row carries the violet label and nothing else, so the band
+    // probes below are unambiguous. The exact-image match pins the
+    // geometry, the right-edge alignment and the hiding at zero.
+    const std::tm calendar = makeCalendar(4); // JUE today
+    auto renderRain = [&](const uint8_t *prob) {
+      const int16_t tmax[4] = {253, 49, 120, 300};
+      const int16_t tmin[4] = {120, 120, 120, 120};
+      const uint8_t code[4] = {0, 0, 0, 0};
+      const weather::Forecast forecast =
+          makeForecast(weather::Unit::Celsius, tmax, tmin, prob, code);
+      realize(forecast, weather::Unit::Celsius, calendar);
+      if (!(canvas ==
+            expectDraw(forecast, weather::Unit::Celsius, calendar))) {
+        std::cerr << "line 0: exact image mismatch\n";
+        return true;
+      }
+      return false;
+    };
+    { // Boundary render A: hidden at 0, white at 1 AND at 30, cyan from
+      // 31; the white band also rejects cyan, the 31 rejects white.
+      const uint8_t prob[4] = {0, 1, 30, 31};
+      CHECK(!renderRain(prob));
+      CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_WHITE));
+      CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_CYAN));
+      CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_INTENSE));
+      CHECK(rightmostInkInBand(canvas, ORIGIN[0], 0, 5) == ORIGIN[0].x0 + 10);
+      CHECK(bandHas(canvas, ORIGIN[1], 0, 5, PINNED_PROB_WHITE));
+      CHECK(!bandHas(canvas, ORIGIN[1], 0, 5, PINNED_PROB_CYAN));
+      CHECK(rightmostInkInBand(canvas, ORIGIN[1], 0, 5) == ORIGIN[1].x0 + 29);
+      CHECK(bandHas(canvas, ORIGIN[2], 0, 5, PINNED_PROB_WHITE));
+      CHECK(!bandHas(canvas, ORIGIN[2], 0, 5, PINNED_PROB_CYAN));
+      CHECK(bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_CYAN));
+      CHECK(!bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_WHITE));
+    }
+    { // Boundary render B: cyan up to 60, intense blue from 61 (rejecting
+      // cyan) and at 100; zero hidden again, in a different cell.
+      const uint8_t prob[4] = {60, 61, 100, 0};
+      CHECK(!renderRain(prob));
+      CHECK(bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_CYAN));
+      CHECK(!bandHas(canvas, ORIGIN[0], 0, 5, PINNED_PROB_INTENSE));
+      CHECK(bandHas(canvas, ORIGIN[1], 0, 5, PINNED_PROB_INTENSE));
+      CHECK(!bandHas(canvas, ORIGIN[1], 0, 5, PINNED_PROB_CYAN));
+      CHECK(bandHas(canvas, ORIGIN[2], 0, 5, PINNED_PROB_INTENSE));
+      CHECK(rightmostInkInBand(canvas, ORIGIN[2], 0, 5) == ORIGIN[2].x0 + 29);
+      CHECK(!bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_INTENSE));
+      CHECK(!bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_CYAN));
+      CHECK(!bandHas(canvas, ORIGIN[3], 0, 5, PINNED_PROB_WHITE));
+      CHECK(rightmostInkInBand(canvas, ORIGIN[3], 0, 5) == ORIGIN[3].x0 + 10);
+    }
   } else if (test == "icons") {
     // S7/S8/S9 layout proofs, one image per rule.
     const uint8_t prob[4] = {10, 45, 80, 5};
@@ -632,11 +709,12 @@ int main(int argc, char **argv) {
       }
       // Sanity: same slot geometry, different widths, different starts.
       CHECK(expectedStart[0] != expectedStart[1]);
-      // The probabilities (neutral muted ink, S10) still end at the
+      // The probabilities (hidden at zero, otherwise inked by their S15
+      // band — white, cyan or intense blue) still end at the
       // cell's own edge on row 0 — one column inside the canvas edge (S12
       // moved the right cells' edge from column 63 to 62).
       for (int i = 0; i < 4; ++i)
-        CHECK(rightmostOf(canvas, ORIGIN[i], PINNED_PROB) ==
+        CHECK(rightmostInkInBand(canvas, ORIGIN[i], 0, 5) ==
               ORIGIN[i].x0 + 29);
     }
     { // (b) The three-glyph drop rule still holds, and an unknown WMO
@@ -724,10 +802,10 @@ int main(int argc, char **argv) {
       realize(forecast, weather::Unit::Celsius, calendar);
       CHECK(canvas == expectDraw(forecast, weather::Unit::Celsius, calendar));
       // Every cell carries a visible day label in its label band (HOY for
-      // today, the weekday for the other three; the exact glyphs are
-      // pinned by the expected-image match above).
+      // today, the weekday for the other three; the exact glyphs and the
+      // S15 violet ink are pinned by the expected-image match above).
       for (int i = 0; i < 4; ++i)
-        CHECK(bandHas(canvas, ORIGIN[i], 0, 5, idle_clock::MUTED));
+        CHECK(bandHas(canvas, ORIGIN[i], 0, 5, PINNED_VIOLET));
     }
   } else if (test == "invalid") {
     // A record without a valid forecast paints NOTHING at all — the board
@@ -774,14 +852,15 @@ int main(int argc, char **argv) {
       CHECK(scaled[p] == (raw[p] == SENTINEL ? SENTINEL : panel::color(raw[p])));
     // S10 bands graded through panel::color: cell 0 maximum -52 °C
     // (COLD) over a 3 °C minimum (COOL); cell 1 maximum 11 °C (COOL); the
-    // amber clear icon and the MUTED probability ink graded too.
+    // amber clear icon and the S15 white probability ink (prob 10)
+    // graded too.
     CHECK(bandHas(scaled, ORIGIN[0], 7, 10, panel::color(PINNED_COLD)));
     CHECK(bandHas(scaled, ORIGIN[0], 19, 10,
                   panel::color(PINNED_COOL)));
     CHECK(bandHas(scaled, ORIGIN[1], 7, 10,
                   panel::color(PINNED_COOL)));
     CHECK(bandHas(scaled, ORIGIN[0], 0, 5,
-                  panel::color(PINNED_PROB)));
+                  panel::color(PINNED_PROB_WHITE)));
     CHECK(bandHas(scaled, ORIGIN[0], 14, 8,
                   panel::color(idle_clock::AMBER)));
     CHECK(!(scaled == raw)); // 30 % default actually changed the values

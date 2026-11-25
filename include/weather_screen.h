@@ -23,7 +23,9 @@
 // discipline with a small row-byte table of their own. Colors leave this
 // renderer raw 565; the pixel callback applies the shared brightness
 // helper panel::color() exactly like every idle_clock::draw call site, so
-// the whole screen dims with the panel setting. No Arduino/WiFi symbols.
+// the whole screen dims with the panel setting. S15: the day label is
+// intense violet and the probability is hidden at zero, banded white /
+// cyan / intense blue when drawn. No Arduino/WiFi symbols.
 namespace weather_screen {
 
 // Geometry fixed by the spec (S1), with the S12 margins: the four cells
@@ -93,11 +95,32 @@ inline void figureText(int value, char (&buffer)[12], size_t &chars) {
   chars = std::strlen(buffer);
 }
 
-constexpr uint16_t INK_LABEL = idle_clock::MUTED;
-// S10: the probability leaves amber (it would share the tone of the warm
-// band); it takes the same neutral, low-weight muted ink as the day
-// labels — present without competing with any temperature colour.
-constexpr uint16_t INK_PROB = idle_clock::MUTED;
+// S15: the day label becomes INTENSE VIOLET rgb(150,60,255) = 0x91FF
+// (the user's "violeta intenso"; an election of this session inside the
+// value the user described, pinned raw in the rig so it cannot drift
+// silently).
+constexpr uint16_t INK_LABEL = idle_clock::rgb(150, 60, 255);
+
+// S15: the probability is not drawn at all when it is zero — no digits
+// and no '%' glyph, the whole right side of the label row left empty —
+// and when drawn its ink follows the probability itself (the user's
+// "escala de blanco a cyan y azul intenso", boundaries fixed at 1-30 /
+// 31-60 / 61-100):
+//   1..30: white — idle_clock::WHITE rgb(242,241,220) = 0xF79B, the same
+//          white the figure ink and the cloudy/snow icons already use,
+//   31..60: cyan rgb(85,189,232) = 0x55FD (the 0..14 temperature band's
+//          tone),
+//   61..100: intense blue rgb(64,64,255) = 0x421F (the below-0 band's
+//          tone).
+// Consequence stated to the user and accepted: cyan and intense blue
+// are the same tones the temperature bands use, so a cold rainy cell
+// repeats hues; position (small digits on the label row) is what
+// separates the two uses.
+inline uint16_t inkForProbability(int probability) {
+  if (probability <= 30) return idle_clock::WHITE;
+  if (probability <= 60) return idle_clock::rgb(85, 189, 232);  // 0x55FD
+  return idle_clock::rgb(64, 64, 255);                           // 0x421F
+}
 
 // The clock glyph table has no percent sign, and the table is shared with
 // the clock (its bitmaps must never move), so the one missing glyph is
@@ -187,17 +210,23 @@ void drawCell(int x0, int y0, size_t index, const weather::Forecast &forecast,
   // own right edge — the '%' ends at column x0+29, one column inside the
   // canvas edge since S12. Zero-padded two digits
   // (100 keeps three); with probability <= 100 the field is at most "100%"
-  // (15 px), never truncated.
-  std::snprintf(buffer, sizeof buffer, "%02u",
-                static_cast<unsigned>(forecast.prob[index]));
-  const int digits = static_cast<int>(std::strlen(buffer));
-  const int left = x0 + CELL_W - detail::probabilityWidth(digits);
-  idle_clock::text(buffer, left, y0 + DY_LABEL, SCALE_LABEL, INK_PROB, plot);
-  const int px = left + 4 * digits;
-  for (int row = 0; row < 5; ++row)
-    for (int col = 0; col < 3; ++col)
-      if (PCT[row] & (4 >> col))
-        plot(px + col, y0 + DY_LABEL + row, INK_PROB);
+  // (15 px), never truncated. S15: at zero NOTHING is drawn —
+  // neither the digits nor the '%' glyph, the whole right side of the
+  // label row left empty — and otherwise the ink follows the
+  // probability's own S15 band.
+  if (forecast.prob[index] != 0) {
+    std::snprintf(buffer, sizeof buffer, "%02u",
+                  static_cast<unsigned>(forecast.prob[index]));
+    const int digits = static_cast<int>(std::strlen(buffer));
+    const int left = x0 + CELL_W - detail::probabilityWidth(digits);
+    const uint16_t probInk = inkForProbability(forecast.prob[index]);
+    idle_clock::text(buffer, left, y0 + DY_LABEL, SCALE_LABEL, probInk, plot);
+    const int px = left + 4 * digits;
+    for (int row = 0; row < 5; ++row)
+      for (int col = 0; col < 3; ++col)
+        if (PCT[row] & (4 >> col))
+          plot(px + col, y0 + DY_LABEL + row, probInk);
+  }
   // S7: both temperatures at scale 2 — the maximum is the primary value.
   // S10: the ink is the band of the displayed value's Celsius equivalent
   // (rounded exactly once, like the printed figure); S11: the minus glyph
