@@ -19,12 +19,12 @@ Actualización cargada y flash verificada: brillo al **25%** (`64/255`), margen 
 
 ## Versión publicada
 
-La release [**v1.5.0**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.5.0) publica el firmware que corre hoy las dos placas: pantalla del tiempo alternando con el reloj (cuatro celdas con hoy y los tres días siguientes, iconos centrados y escala de color por temperatura), interruptor para apagarla sin descargas, aviso de la IP durante tres segundos al conectar, recuperación sin cables mediante portal cautivo, selector de redes, página de ajustes en la red (`/config`) con brillo en ejecución (25-80 %), reloj 12/24 h, ciudad y unidades, orden de canales HUB75 seleccionable, recalibración de orientación y reset de credenciales con una pulsación larga de DOWN.
+La release [**v1.5.1**](https://github.com/arkamax404-max/emote-display-firmware/releases/tag/v1.5.1) publica el firmware que corre hoy las dos placas: pantalla del tiempo alternando con el reloj (cuatro celdas con hoy y los tres días siguientes, iconos centrados, escala de color por temperatura, días en violeta y probabilidad de lluvia oculta cuando es cero), interruptor para apagarla sin descargas, aviso de la IP durante tres segundos al conectar, recuperación sin cables mediante portal cautivo, selector de redes, página de ajustes en la red (`/config`) con brillo en ejecución (25-80 %), reloj 12/24 h, ciudad y unidades, orden de canales HUB75 seleccionable, recalibración de orientación y reset de credenciales con una pulsación larga de DOWN.
 
 | Asset | Contenido |
 | --- | --- |
-| [`firmware-panel-config.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.5.0/firmware-clock-weather.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 2 136 576 bytes, SHA256 `e334fe76621eb153f8062bc6d5d4a6a5223ec532578f027d7a5b3ff287feb6fe`, 4 173 bloques, familia `0xc47e5767` |
-| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.5.0/manifest.json) | Procedencia reproducible: commit de origen, binario y su hash, comandos exactos, herramienta, validación del UF2 y la grabación realizada |
+| [`firmware-panel-config.uf2`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.5.1/firmware-clock-weather.uf2) | Imagen de aplicación para TinyUF2, OTA0, base `0x0`. 2 136 576 bytes, SHA256 `f280567f42301be4386b01db6c73b43cd976c67d0b88281284e2ffcd2f224c0f`, 4 173 bloques, familia `0xc47e5767` |
+| [`manifest.json`](https://github.com/arkamax404-max/emote-display-firmware/releases/download/v1.5.1/manifest.json) | Procedencia reproducible: commit de origen, binario y su hash, comandos exactos, herramienta, validación del UF2 y la grabación realizada |
 
 Para grabarla: doble reset para entrar en TinyUF2, copia el `.uf2` al volumen `MATRXS3BOOT` y espera a que el bootloader reinicie. No hay que borrar nada ni tocar `CURRENT.UF2`. La copia escribe solo la partición de aplicación, así que el Wi-Fi, la orientación, el brillo y el orden de canales guardados se conservan.
 
