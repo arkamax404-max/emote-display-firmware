@@ -29,6 +29,7 @@
 #include <WiFiClientSecure.h>
 #include <DNSServer.h>
 #include <esp_system.h>
+#include <sys/time.h>
 #include <new> // placement construction of the panel after the order is known
 
 // TI USB gate: a USB HOST is enumerated by the bus — what S1 asks for — not
@@ -527,7 +528,9 @@ static bool readClock(std::tm &calendar, std::time_t &epoch) {
 static void renderContent() {
   std::tm calendar = {};
   std::time_t epoch = 0;
-  const auto source = clockState.source(millis(), readClock(calendar, epoch), hasFrame, wifiInfo.visible());
+  // Keep portal slides visible even when USB has just made the RTC valid.
+  const bool clockAvailable = !portalActive && readClock(calendar, epoch);
+  const auto source = clockState.source(millis(), clockAvailable, hasFrame, wifiInfo.visible());
   clockState.painted(millis(), source);
   matrix.setRotation(orientation.rotation());
   matrix.fillScreen(0); // Clear the top margin after every redraw/rotation.
@@ -1583,10 +1586,19 @@ static void queueSerialReply(uint16_t requestId, serial::Code code) {
   flushSerialReply();
 }
 
-// One frame handling pass, identical admission/commit rules as pollHttp: the
-// frame is fully received and CRC-validated before the ownership decision;
-// the reply is queued only after the accepted presentation; a rejected frame
-// changes no state at all. USB frames never touch the sender IP stats.
+static bool setSerialUtc(uint32_t seconds) {
+  const std::time_t epoch = static_cast<std::time_t>(seconds);
+  std::tm calendar = {};
+  if (static_cast<uint32_t>(epoch) != seconds || !localtime_r(&epoch, &calendar))
+    return false;
+  struct timeval time = {};
+  time.tv_sec = epoch;
+  return settimeofday(&time, nullptr) == 0;
+}
+
+// A validated frame goes through ownership admission before any display
+// change. The reply is queued only after the accepted presentation; USB
+// frames never touch the sender IP stats.
 static void handleSerialFrame() {
   const serial::Frame frame = serialParser.frame();
   const uint32_t now = millis();
@@ -1607,6 +1619,13 @@ static void handleSerialFrame() {
     } else {
       serialDiag.onRejected(now); // admission rejection, state untouched
     }
+  } else if (frame.op == serial::Op::ClockUtc) {
+    code = serial::activateClock(frame, sessionOwner, now, setSerialUtc, [&]() {
+      hasFrame = false;
+      serialDiag.onControlAccepted(now);
+      presentDisplay();
+    });
+    if (code != serial::Code::Ok) serialDiag.onRejected(now);
   } else {
     code = image_ingress::admitControl(frame, sessionOwner, clockState, now);
     if (code == serial::Code::Ok) {
@@ -1637,7 +1656,7 @@ static void pollSerialFrames() {
         serialDiag.onRejected(now);
         break;
       case serial::Mux::Event::RepeatEntry:
-        Serial.println(serial::ENTRY_ACK);
+        serial::printEntryAck([](const char *line) { Serial.println(line); });
         break;
       case serial::Mux::Event::Exit:
         Serial.println(serial::EXIT_ACK);

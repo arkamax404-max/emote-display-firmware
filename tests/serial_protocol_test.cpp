@@ -42,7 +42,7 @@ void feedChunked(serial::Parser &parser, const std::vector<uint8_t> &bytes, size
 }
 
 // One report line per parser state: "complete <op> <requestId> <session|->
-// <clock|avatar> <payloadLen> <payloadCrc> <name|-> skipped=<n>",
+// <clock|avatar> <payloadLen> <payloadCrc> <name|-> skipped=<n> [utc=<epoch>]",
 // "error <code> skipped=<n>", "active"/"idle skipped=<n>".
 void report(const serial::Parser &parser, const uint8_t *payload) {
   switch (parser.status()) {
@@ -53,7 +53,9 @@ void report(const serial::Parser &parser, const uint8_t *payload) {
                 << (f.clockState ? "clock" : "avatar") << ' ' << f.payloadLength << ' '
                 << receiver::crc32(payload, f.payloadLength) << ' '
                 << (f.hasName ? f.projectName : "-")
-                << " skipped=" << parser.skipped() << '\n';
+                << " skipped=" << parser.skipped();
+      if (f.op == serial::Op::ClockUtc) std::cout << " utc=" << f.utcSeconds;
+      std::cout << '\n';
       break;
     }
     case serial::Parser::Status::Error:

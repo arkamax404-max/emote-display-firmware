@@ -4,7 +4,8 @@ Firmware-side binary serial transport for display updates (task
 `odd/tasks/usb-serial-ingress.md`, T1+T2). It carries the same operations and
 metadata as the HTTP path — image, claim, heartbeat, release, session id,
 project name, clock state — over USB CDC, with the same validation and the
-same no-state-change guarantee on rejection. Implemented in
+same no-state-change guarantee on rejection. USB also supports setting UTC
+and activating the autonomous clock without a PNG. Implemented in
 `include/serial_protocol.h` (frames), `include/serial_ingress.h`
 (multiplexing) and `include/image_ingress.h` (admission/commit rules shared
 with the HTTP path in `src/main.cpp`); the sender is a separate repository.
@@ -12,12 +13,15 @@ with the HTTP path in `src/main.cpp`); the sender is a separate repository.
 ## Quick path
 
 1. Sender opens the port (console/provision mode is the default) and sends
-   the exact line `EMOTE\n`; the firmware answers `EMOTE_READY\n` and the
-   binary session begins.
+   the exact line `EMOTE\n` (or `EMOTE\r\n`); the firmware answers with the
+   standalone ASCII line `EMOTE_CLOCK_UTC1` immediately before the unchanged
+   `EMOTE_READY` line. Both initial and idle repeated entry announce the
+   capability. Accept LF or CRLF on these reply lines. If the exact capability
+   line did not precede ready on this connection, use the legacy clock PNG.
 2. Sender builds one frame per operation (layout below) and writes it to the
    serial port, keeping exactly one frame in flight (stop-and-wait).
 3. Firmware validates the frame, applies the ownership rules and presents
-   accepted images, then answers with a 12-byte `EMTR` reply carrying the
+   accepted images or the clock, then answers with a 12-byte `EMTR` reply carrying the
    sender's request id; the sender matches replies by that id and the `EMTR`
    prefix (console log lines may interleave between replies, so the sender
    must scan, never read line-wise).
@@ -30,14 +34,14 @@ with the HTTP path in `src/main.cpp`); the sender is a separate repository.
 |--------|------|-------|
 | 0 | 4 | magic `EMTS` (0x45 0x4D 0x54 0x53) |
 | 4 | 1 | version, must be 1 |
-| 5 | 1 | op: 0 image, 1 claim, 2 heartbeat, 3 release |
+| 5 | 1 | op: 0 image, 1 claim, 2 heartbeat, 3 release, 4 clock UTC |
 | 6 | 1 | flags: bit0 hasSession, bit1 hasName, bit2 clockState; bits 3–7 reserved 0 |
 | 7 | 1 | reserved, must be 0 |
 | 8 | 2 | requestId (uint16, sender-chosen correlation id, echoed in the reply) |
 | 10 | 2 | sessionIdLen |
 | 12 | 2 | nameLen (encoded name bytes) |
 | 14 | 4 | payloadLen (uint32) |
-| 18 | … | sessionId bytes (present iff bit0), name bytes (iff bit1), payload bytes (image only) |
+| 18 | … | sessionId bytes (present iff bit0), name bytes (iff bit1), payload bytes (image or clock UTC) |
 | last 4 | 4 | CRC-32 of the whole frame, little-endian |
 
 CRC-32 is the reflected polynomial 0xEDB88320, init 0xFFFFFFFF, final xor
@@ -50,9 +54,12 @@ four CRC bytes themselves are excluded from their own checksum.
 - sessionIdLen: 1..128 iff hasSession, otherwise exactly 0.
 - nameLen: 1..1152 iff hasName, otherwise exactly 0.
 - payloadLen: image 1..32768 (`receiver::MAX_PNG`); claim/heartbeat/release 0.
-- payloadLen above 32768 or above the receiver's payload capacity is rejected
-  immediately (`oversize`) without waiting for bytes that would never fit.
+- Image payloadLen above 32768, or an otherwise valid payload larger than
+  the receiver's buffer, is rejected immediately (`oversize`).
 - claim/heartbeat/release require the hasSession flag.
+- Clock UTC requires flags exactly `0x01`, a session id, `nameLen = 0`, and
+  `payloadLen = 4`. The payload is one little-endian unsigned UTC epoch
+  seconds value; bit2 (the legacy clock PNG flag) is not allowed.
 
 A violation answers `length`, `oversize`, `flags`, `reserved`, `version`,
 `op` or `session` (control without identity) and the frame is discarded. The
@@ -73,8 +80,16 @@ with a previous frame's id.
 - Image payload must pass the same `receiver::validPngEnvelope` check as HTTP
   (64×64 RGBA8, non-interlaced, IHDR/IDAT/IEND) → otherwise `png`. Full pixel
   decoding stays with the presentation stage, as on HTTP.
-- clockState is metadata parity with `X-Emote-State: clock`; it is never
-  rejected.
+- On legacy operations, clockState is metadata parity with
+  `X-Emote-State: clock`; it is never rejected there.
+- Clock UTC accepts epochs `1577836800..2147483647` inclusive. After validation,
+  it checks the same ownership decision as an image without mutating the
+  lease, sets the board RTC, retires the displayed PNG, and presents the
+  autonomous clock with the board's existing timezone. Overlays and portal
+  presentation retain precedence. Rejection preserves the RTC and settled
+  frame; no image counter, session title or lease is changed by this operation.
+  A mounted USB host suppresses weather fetching and display without changing
+  the stored weather setting.
 
 ## Reply frame (12 bytes)
 
@@ -87,26 +102,27 @@ with a previous frame's id.
 | 8 | 4 | CRC-32 over bytes 0–7, little-endian |
 
 Result codes: 0 ok, 1 crc, 2 version, 3 op, 4 flags, 5 reserved, 6 length,
-7 oversize, 8 session, 9 name, 10 png, 11 busy (reserved for the T2 ownership
-conflict, HTTP 409 parity). Only the request id is echoed — never a session id
+7 oversize, 8 session, 9 name, 10 png, 11 busy (ownership conflict, HTTP 409
+parity), 12 time (epoch out of range or RTC set failed). Only the request id
+is echoed — never a session id
 or name — so wire logs stay free of identity data.
 
 ## Flow, backpressure and resync
 
 | Topic | Contract |
 |-------|----------|
-| Session | Frames are only processed inside an explicit binary session. Provision mode is the default and owns every byte, so console lines — including credentials that start with `EMTS` or equal `EMOTE` — behave exactly as before. `EMOTE\n` at the top level enters the session (`EMOTE_READY`); `EMTE\n` leaves it (`EMOTE_EXIT`). |
-| Exit safety | `EMTE\n` and a repeated `EMOTE\n` (a lost `EMOTE_READY`) are recognized only while the parser is idle — never inside a frame, so a PNG payload can never trigger them. The recognition window resets at every frame boundary and on timeout. Bounded scope: a plain truncated frame or its magic prefix stays binary skipped bytes and can never reach provisioning, and only the **complete** sequences trigger. The firmware cannot promise protection from an arbitrary corrupted tail that happens to contain the exact `EMTE\n` while idle — that tail is by definition a valid exit command, and it exits. |
+| Session | Frames are only processed inside an explicit binary session. Provision mode is the default and owns every byte, so console lines — including credentials that start with `EMTS` or equal `EMOTE` — behave exactly as before. `EMOTE\n` at the top level enters the session (`EMOTE_CLOCK_UTC1`, then `EMOTE_READY`); `EMTE\n` leaves it (`EMOTE_EXIT`). |
+| Exit safety | `EMTE\n` and a repeated `EMOTE\n` or `EMOTE\r\n` (a lost `EMOTE_READY`) are recognized only while the parser is idle — never inside a frame, so a PNG payload can never trigger them. The recognition window resets at every frame boundary and on timeout. Bounded scope: a plain truncated frame or its magic prefix stays binary skipped bytes and can never reach provisioning, and only the **complete** sequences trigger. The firmware cannot promise protection from an arbitrary corrupted tail that happens to contain the exact `EMTE\n` while idle — that tail is by definition a valid exit command, and it exits. |
 | Stop-and-wait | The sender keeps exactly one frame in flight and waits for the `EMTR` reply (or a resend timeout) before the next frame. There is no frame queue on either side. |
-| Retry (at-least-once) | There is no deduplication cache: `requestId` is correlation only, never exactly-once delivery. On a missing or NACK reply the sender resends the whole frame; a resent image is simply a new accepted image — it increments the frame counter, refreshes the lease and re-applies the title time. An ACK means the frame was actually applied (admitted and presented), so a sender that missed the ACK must be prepared for that re-application; controls are not retried automatically by the firmware, and a resent explicit claim deliberately re-claims (it can take ownership again, which is the claim's meaning). Release stays idempotent without an owner; heartbeat/release from a foreign session answer `busy` again. Reconnect and retry policy is sender responsibility. |
-| Backpressure | If USB CDC drops bytes under load the CRC fails → `crc` NACK → stop-and-wait resend. The sender must never stream ahead of replies. |
+| Retry (at-least-once) | There is no deduplication cache: `requestId` is correlation only, never exactly-once delivery. For legacy operations (0–3), the sender may resend the whole frame on a missing or NACK reply; a resent image is simply a new accepted image — it increments the frame counter, refreshes the lease and re-applies the title time. An ACK means the frame was actually applied (admitted and presented), so a sender that missed the ACK must be prepared for that re-application; controls are not retried automatically by the firmware, and a resent explicit claim deliberately re-claims (it can take ownership again, which is the claim's meaning). Release stays idempotent without an owner; heartbeat/release from a foreign session answer `busy` again. Clock UTC sends the current wall-clock value once, with no replay; use the legacy PNG only after definite rejection while still idle on the same link, not after an ambiguous timeout. Reconnect and retry policy is sender responsibility. |
+| Backpressure | If USB CDC drops bytes under load, the receiver returns a `crc` NACK. A legacy request may be resent via stop-and-wait; clock UTC follows the rejection/timeout policy above without replaying the timestamp. The sender must never stream ahead of replies. |
 | Timeouts | Two bounded windows apply inside the binary session: **1 s inactivity** (a live sender never stalls mid-frame that long; USB CDC gaps are not baud-bounded) and **10 s total per frame** (a 32 KiB frame needs ≈2.9 s at 115200 8N1; 3× margin). Expiry discards the open frame, resyncs the parser and clears the entry/exit scan window (stale bytes can never complete a sequence); the session stays binary so a dead frame's tail is skipped, never returned to the console; no reply is sent for a timed-out frame. A plain truncated magic never escapes to the console. The HTTP request timeout (2.5 s) is a distinct policy and is unchanged. |
 | Resync | Outside a binary session, `EMTS` bytes are plain console data and the parser is never fed — provisioning routing cannot be hijacked by frame bytes or tails. Inside the session, bytes before a magic and the tail of a rejected frame are counted as skipped and never interpreted. |
 | Truncation | A frame that simply stops mid-stream never completes; the parser stays `active` until the missing bytes arrive or a timeout discards it. |
 | Buffering | The parser is allocation-free and takes an externally supplied payload buffer — a dedicated static serial buffer on the device; the shared HTTP PNG buffer is never used for serial traffic. Bytes in that buffer are untrusted until a frame reports complete. |
 | Reply TX | The firmware writes the 12-byte reply in a single bounded, non-blocking write gated by `availableForWrite()`; at most one reply is pending (stop-and-wait), so a host that stopped reading can never stall the cooperative loop. |
 | Output | The parsed `Frame` is stable only between a complete result and the next `feed()`/`reset()`. After any rejection the exposed frame is scrubbed and previously accepted display state is untouched. `Parser::feed(data, length)` returns the number of bytes consumed and stops right after a terminal event — a suffix after that point stays unconsumed for the next call and is never dropped. |
-| Admission | The serial path reuses the exact HTTP admission and commit rules (`include/image_ingress.h`): ownership check before presentation, ACK only after a successful presentation, lease renewal and title commit only then. USB frames never create sender IP stat entries. |
+| Admission | The serial path reuses the exact HTTP admission and commit rules (`include/image_ingress.h`): ownership check before presentation, ACK only after a successful presentation, lease renewal and title commit only then for images. Clock UTC uses the same admission without renewing the lease or committing a title. USB frames never create sender IP stat entries. |
 
 ## Diagnostic indicator (T7)
 
@@ -121,7 +137,7 @@ frame can never erase it. Exactly ten pixels are written per draw.
 | Signal | Meaning |
 |--------|---------|
 | Amber | Serial bytes are pending: the first received byte armed the window and no binary operation has completed yet. Any traffic class counts — console bytes and partial magic included — but **port opening or boot never marks anything**. |
-| Green | A binary operation was actually accepted: an image decoded and presented, or a claim/heartbeat/release admitted. A green from the claim a sender sends on port open does **not** prove a frame arrived — the `/health` counters distinguish image from control acceptances. |
+| Green | A binary operation was actually accepted: an image decoded and presented, or a claim/heartbeat/release/clock UTC operation admitted and applied. A green from the claim a sender sends on port open does **not** prove a frame arrived — the `/health` counters distinguish image from control acceptances. |
 | Red | A binary parse/decode/admission rejection, or a reception timeout. Unframed console traffic (WIFI/ORIENT, garbage, partial magic) that never completes a binary operation also turns red after the inactivity window — documented, intended. |
 | (none) | No serial traffic since boot; a held terminal result keeps showing with no new bytes. |
 
@@ -142,7 +158,7 @@ Timing rules (exact):
 
 `GET /health` gains three additive, saturating (never-wrap) `uint32` fields:
 `serialRxImages` (incremented only after actual successful presentation of
-an image frame), `serialRxControls` (claim/heartbeat/release) and
+an image frame), `serialRxControls` (claim/heartbeat/release/clock UTC) and
 `serialRxRejected` (parse/decode/admission rejections and timeouts). All
 previous fields are unchanged. The rejection counter is diagnostic-only: a
 rejection still changes no frame, title, lease or ownership state, and the
@@ -160,8 +176,8 @@ before.
 
 ## Checklist
 
-- [ ] Sender can build all four operations with the layout table alone.
-- [ ] Sender enters with `EMOTE`/`EMOTE_READY` and leaves with `EMTE`/`EMOTE_EXIT`.
+- [ ] Sender can build all five operations with the layout table alone.
+- [ ] Sender enters with `EMOTE` → `EMOTE_CLOCK_UTC1` / `EMOTE_READY` and leaves with `EMTE` / `EMOTE_EXIT`.
 - [ ] Receiver answers every frame with exactly one correlated reply.
 - [ ] A corrupted, truncated or hostile frame changes no display state.
 - [ ] The diagnostic triangle shows amber while bytes are pending, green

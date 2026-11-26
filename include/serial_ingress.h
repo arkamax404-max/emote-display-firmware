@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include "image_ingress.h"
 #include "rgb_order.h"
 #include "serial_protocol.h"
 
@@ -26,15 +27,34 @@ constexpr uint32_t FRAME_TOTAL_MS = 10000;
 
 constexpr const char *ENTRY_COMMAND = "EMOTE";
 constexpr const char *ENTRY_ACK = "EMOTE_READY";
+constexpr const char *CLOCK_CAPABILITY = "EMOTE_CLOCK_UTC1";
 constexpr const char *EXIT_ACK = "EMOTE_EXIT";
 
-// Byte values of "EMTE\n" (5 bytes) and "EMOTE\n" (6 bytes) for the
-// idle-scan window.
-constexpr uint64_t EXIT_SEQUENCE = 0x454D54450AULL;
-constexpr uint64_t ENTRY_SEQUENCE = 0x454D4F54450AULL;
-// Mask for the six-byte entry comparison (the exit sequence is five bytes
-// and already fits below).
-constexpr uint64_t SEQ_MASK = 0xFFFFFFFFFFFFULL;
+template <typename PrintLine>
+inline void printEntryAck(const PrintLine &print) {
+  print(CLOCK_CAPABILITY);
+  print(ENTRY_ACK);
+}
+
+// Byte values for the idle-scan window. Re-entry accepts either line ending;
+// the existing binary exit sequence stays unchanged.
+constexpr uint64_t EXIT_SEQUENCE = 0x454D54450AULL;          // EMTE\n
+constexpr uint64_t ENTRY_SEQUENCE = 0x454D4F54450AULL;       // EMOTE\n
+constexpr uint64_t ENTRY_SEQUENCE_CRLF = 0x454D4F54450D0AULL; // EMOTE\r\n
+
+// A parser-validated clock request shares image admission, whose expiry
+// check may mutate its Owner. Evaluate on a snapshot so clock admission
+// never changes the actual lease, even when setting UTC subsequently fails.
+template <typename SetUtc, typename Present>
+inline Code activateClock(const Frame &frame, const session::Owner &owner,
+                          uint32_t now, SetUtc setUtc, Present present) {
+  session::Owner snapshot = owner;
+  const Code access = image_ingress::admitImage(frame, snapshot, now);
+  if (access != Code::Ok) return access;
+  if (!setUtc(frame.utcSeconds)) return Code::Time;
+  present();
+  return Code::Ok;
+}
 
 // The console line protocol, extracted verbatim from pollProvisioning so the
 // exact previous behavior (strings, limits, stage machine, 60 s stage
@@ -78,7 +98,7 @@ class ProvisionConsole {
       started_ = now;
       hooks_.print("WIFI_SSID");
     } else if (stage_ == 0 && line_ == ENTRY_COMMAND) {
-      hooks_.print(ENTRY_ACK);
+      printEntryAck(hooks_.print);
       result = Event::EnterBinary;
     } else if (stage_ == 0 && line_ == "RGB") {
       // `RGB` with no order name: the same rejection as a name that does
@@ -204,7 +224,8 @@ class Mux {
         mode_ = Mode::Provision;
         return {Event::Exit, 0};
       }
-      if ((window_ & SEQ_MASK) == ENTRY_SEQUENCE) {
+      if ((window_ & 0xFFFFFFFFFFFFULL) == ENTRY_SEQUENCE ||
+          (window_ & 0xFFFFFFFFFFFFFFULL) == ENTRY_SEQUENCE_CRLF) {
         parser_.reset();
         window_ = 0;
         return {Event::RepeatEntry, 0};

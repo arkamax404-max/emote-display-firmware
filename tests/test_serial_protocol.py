@@ -9,7 +9,7 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 MAGIC = b"EMTS"
-IMAGE, CLAIM, HEARTBEAT, RELEASE = 0, 1, 2, 3
+IMAGE, CLAIM, HEARTBEAT, RELEASE, CLOCK_UTC = range(5)
 F_SESSION, F_NAME, F_CLOCK = 1, 2, 4
 MAX_FRAME = 18 + 128 + 1152 + 32768 + 4
 
@@ -42,6 +42,13 @@ def frame(op=IMAGE, request_id=1, flags=0, session=b"", name=b"", payload=b"",
             + session + name + payload)
     checksum = zlib.crc32(body) & 0xffffffff if crc is None else crc
     return body + struct.pack("<I", checksum)
+
+
+def clock_utc(epoch=1577836800, **overrides):
+    fields = dict(op=CLOCK_UTC, request_id=41, flags=F_SESSION,
+                  session=b"session-a", payload=struct.pack("<I", epoch))
+    fields.update(overrides)
+    return frame(**fields)
 
 
 def msvc_vcvars():
@@ -87,6 +94,7 @@ class SerialProtocolTests(unittest.TestCase):
     def run_bytes(self, args, data):
         result = subprocess.run([str(self.binary)] + args, input=data,
                                 capture_output=True, check=True)
+        self.assertEqual(result.stderr, b"")
         return result.stdout
 
     def run_cli(self, args, data):
@@ -152,6 +160,59 @@ class SerialProtocolTests(unittest.TestCase):
                 self.assertEqual(result["payload_len"], "0")
                 self.assertEqual(result["name"], "-")
 
+    def test_legacy_controls_still_ignore_name_and_accept_clock_flag(self):
+        for op, kind in ((CLAIM, "claim"), (HEARTBEAT, "heartbeat"), (RELEASE, "release")):
+            with self.subTest(op=kind):
+                raw = frame(op=op, flags=F_SESSION | F_NAME | F_CLOCK,
+                            session=b"lab", name=b"%0A")
+                self.assertEqual(self.run_bytes(["frame"], raw),
+                                 f"complete {kind} 1 lab clock 0 0 - skipped=0\n".encode())
+
+    def test_clock_utc_bounds_and_fragmentation(self):
+        for epoch in (1577836800, 2147483647):
+            for chunk_size in (1, 3, None):
+                with self.subTest(epoch=epoch, chunk=chunk_size):
+                    checksum = zlib.crc32(struct.pack("<I", epoch))
+                    args = ["frame"] + ([str(chunk_size)] if chunk_size else [])
+                    self.assertEqual(self.run_bytes(args, clock_utc(epoch)),
+                                     (f"complete clock-utc 41 session-a avatar 4 "
+                                      f"{checksum} - skipped=0 utc={epoch}\n").encode())
+
+    def test_clock_utc_rejection_and_legacy_frame_alignment(self):
+        cases = [
+            (clock_utc(flags=0, session=b""), 4),
+            (clock_utc(flags=F_SESSION | F_CLOCK), 4),
+            (clock_utc(flags=F_SESSION | F_NAME, name=b"x"), 4),
+            (clock_utc(flags=F_SESSION | 0x80), 4),
+            (clock_utc(session=b""), 6),
+            (clock_utc(session=b"bad id"), 8),
+            (clock_utc(name=b"x"), 6),
+            (clock_utc(payload=b""), 6),
+            (clock_utc(payload=b"abc"), 6),
+            (clock_utc(payload=b"abcde"), 6),
+            (clock_utc(1577836799), 12),
+            (clock_utc(2147483648), 12),
+            (clock_utc(4294967295), 12),
+            (clock_utc(0, crc=0), 1),
+        ]
+        image = frame(request_id=42, flags=F_CLOCK, payload=png())
+
+        def reply(request_id, code):
+            head = b"EMTR" + bytes([1, code]) + struct.pack("<H", request_id)
+            return head + struct.pack("<I", zlib.crc32(head))
+
+        for rejected, code in cases:
+            with self.subTest(code=code, rejected=rejected.hex()):
+                self.assertEqual(self.run_bytes(["reply-for"], rejected + image),
+                                 reply(41, code) + reply(42, 0))
+        whole = clock_utc()
+        self.assertEqual(self.run_bytes(["consume"], whole[:-1]),
+                         f"{len(whole) - 1} active\n".encode())
+        self.assertEqual(self.run_bytes(["consume"], whole + image),
+                         f"{len(whole)} complete\n{len(image)} complete\n".encode())
+        self.assertEqual(self.run_bytes(["frame", "1", "3"], whole),
+                         b"error oversize skipped=0\n")
+
     def test_clock_metadata_parity(self):
         self.assertEqual(self.out(frame(op=IMAGE, flags=F_SESSION | F_CLOCK,
                                         session=b"abcd1234", payload=png()))["clock"],
@@ -174,7 +235,7 @@ class SerialProtocolTests(unittest.TestCase):
         cases = [
             (frame(version=0, **base), "version"),
             (frame(version=2, **base), "version"),
-            (frame(op=4, flags=F_SESSION), "op"),
+            (frame(op=5, flags=F_SESSION), "op"),
             (frame(op=255, flags=F_SESSION), "op"),
             (frame(reserved=1, **base), "reserved"),
             (frame(op=CLAIM, flags=0x08), "flags"),

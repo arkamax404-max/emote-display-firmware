@@ -9,7 +9,7 @@ import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_serial_protocol import (CLAIM, F_NAME, F_CLOCK, F_SESSION, HEARTBEAT,
-                                  IMAGE, RELEASE, chunk, frame, msvc_vcvars,
+                                  IMAGE, RELEASE, chunk, clock_utc, frame, msvc_vcvars,
                                   png)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -56,6 +56,7 @@ class SerialIngressTests(unittest.TestCase):
         result = subprocess.run([str(self.binary), mode],
                                 input=mux_script(lines).encode("latin-1"),
                                 capture_output=True, check=True)
+        self.assertEqual(result.stderr, b"")
         return result.stdout.decode("latin-1").splitlines()
 
     def dispatcher(self, raw):
@@ -128,8 +129,9 @@ class SerialIngressTests(unittest.TestCase):
                                "mode=provision status=idle skipped=0 req=0"])
 
     def test_emote_line_enters_binary_via_console_event(self):
-        out = self.run_script(["cfeed " + b"EMOTE\n".hex()], mode="console")
-        self.assertEqual(out, ["out EMOTE_READY", "enter-binary"])
+        for request in (b"EMOTE\n", b"EMOTE\r\n"):
+            out = self.run_script(["cfeed " + request.hex()], mode="console")
+            self.assertEqual(out, ["out EMOTE_CLOCK_UTC1", "out EMOTE_READY", "enter-binary"])
 
     def test_binary_bytes_never_reach_console(self):
         out = self.run_script(["enter", feed(self.good_image(request_id=5)),
@@ -172,8 +174,17 @@ class SerialIngressTests(unittest.TestCase):
         # A sender that missed EMOTE_READY can resend the entry line; the
         # parser resyncs and the integration re-acks instead of stranding it.
         out = self.run_script(["enter", feed(b"EMOTE\n"), "show"])
-        self.assertEqual(out, ["entered", "reenter", "console -",
+        self.assertEqual(out, ["entered", "out EMOTE_CLOCK_UTC1", "out EMOTE_READY",
+                               "reenter", "console -",
                                "mode=binary status=idle skipped=0 req=0"])
+
+    def test_clock_capability_repeated_in_binary_mode(self):
+        for request in (b"EMOTE\n", b"EMOTE\r\n"):
+            with self.subTest(request=request):
+                out = self.run_script(["enter", feed(request[:2]), feed(request[2:]), "show"])
+                self.assertEqual(out, ["entered", "console -", "out EMOTE_CLOCK_UTC1",
+                                       "out EMOTE_READY", "reenter", "console -",
+                                       "mode=binary status=idle skipped=0 req=0"])
 
     def test_inactivity_timeout_discards_tail_and_stays_binary(self):
         whole = self.good_image()
@@ -330,6 +341,36 @@ class SerialIngressTests(unittest.TestCase):
         out = self.run_script(["enter", feed(claim), feed(bad_name), "state"])
         self.assertEqual(out[3], "nack name 2")
         self.assertEqual(out[5], "owner=1 owned=session-a title=- presented=0")
+
+    def test_clock_session_gate_and_rtc_failure_preserve_settled_frame(self):
+        claim = frame(op=CLAIM, flags=F_SESSION, session=b"session-a", request_id=1)
+        image = self.good_image(session=b"session-a", name=b"lab", request_id=2)
+        out = self.run_script(["enter", feed(claim), feed(image), "clockstate",
+                               feed(clock_utc(session=b"foreign")), "clockstate",
+                               "rtc fail", feed(clock_utc()), "clockstate", "diag", "state",
+                               "rtc ok", feed(clock_utc(2147483647)), "clockstate", "diag", "state",
+                               feed(image), "clockstate"])
+        self.assertEqual(out, [
+            "entered", "ack ok 1", "console -", "ack ok 2", "console -",
+            "utc=0 frame=1 sets=0 clock-paints=0", "ack busy 41", "console -",
+            "utc=0 frame=1 sets=0 clock-paints=0", "rtc=fail", "ack time 41", "console -",
+            "utc=0 frame=1 sets=1 clock-paints=0", "diag red images=1 controls=1 rejected=2",
+            "owner=1 owned=session-a title=lab presented=1", "rtc=ok", "ack ok 41", "console -",
+            "utc=2147483647 frame=0 sets=2 clock-paints=1", "diag green images=1 controls=2 rejected=2",
+            "owner=1 owned=session-a title=lab presented=1", "ack ok 2", "console -",
+            "utc=2147483647 frame=1 sets=2 clock-paints=1",
+        ])
+
+    def test_clock_does_not_claim_or_renew_the_existing_lease(self):
+        claim = frame(op=CLAIM, flags=F_SESSION, session=b"session-a")
+        out = self.run_script(["enter", feed(clock_utc()), "state", feed(claim),
+                               "tick 29999", feed(clock_utc()), "tick 1",
+                               feed(clock_utc(session=b"foreign")), "clockstate"])
+        self.assertEqual(out, ["entered", "ack ok 41", "console -",
+                               "owner=0 owned=- title=- presented=0", "ack ok 1", "console -",
+                               "tick binary complete", "ack ok 41", "console -",
+                               "tick binary complete", "ack ok 41", "console -",
+                               "utc=1577836800 frame=0 sets=3 clock-paints=3"])
 
     # --- lifecycle controls: identical Owner policy -------------------------
 

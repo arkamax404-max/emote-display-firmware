@@ -7,7 +7,7 @@
 #include "session_owner.h"
 
 // Bounded binary serial ingress protocol (docs/serial-transport.md). One
-// framed operation per frame — image, claim, heartbeat or release — with the
+// framed operation per frame — image, claim, heartbeat, release or UTC clock — with the
 // same session identity, project-name decoder, PNG envelope check and clock
 // metadata parity as the HTTP parser, plus a compact correlated reply. The
 // parser is allocation-free: the caller supplies the payload buffer (T2
@@ -26,13 +26,15 @@ constexpr size_t REPLY_SIZE = 12;
 constexpr uint8_t MAGIC[4] = {'E', 'M', 'T', 'S'};
 constexpr uint8_t REPLY_MAGIC[4] = {'E', 'M', 'T', 'R'};
 
-enum class Op : uint8_t { Image = 0, Claim = 1, Heartbeat = 2, Release = 3 };
+enum class Op : uint8_t { Image = 0, Claim = 1, Heartbeat = 2, Release = 3, ClockUtc = 4 };
+constexpr uint32_t MIN_CLOCK_UTC = 1577836800u;
+constexpr uint32_t MAX_CLOCK_UTC = 2147483647u;
 
-// Parser error codes double as reply result codes; Ok is the reply ACK value
-// and Busy is reserved for the T2 ownership conflict (HTTP 409 parity).
+// Parser error codes double as reply result codes; Busy is the ownership
+// conflict (HTTP 409 parity), and Time also covers runtime clock-set failure.
 enum class Code : uint8_t {
   Ok = 0, Crc = 1, Version = 2, Op = 3, Flags = 4, Reserved = 5,
-  Length = 6, Oversize = 7, Session = 8, Name = 9, Png = 10, Busy = 11,
+  Length = 6, Oversize = 7, Session = 8, Name = 9, Png = 10, Busy = 11, Time = 12,
 };
 
 inline const char *opName(Op op) {
@@ -40,6 +42,7 @@ inline const char *opName(Op op) {
     case Op::Claim: return "claim";
     case Op::Heartbeat: return "heartbeat";
     case Op::Release: return "release";
+    case Op::ClockUtc: return "clock-utc";
     default: return "image";
   }
 }
@@ -57,6 +60,7 @@ inline const char *codeName(Code code) {
     case Code::Session: return "session";
     case Code::Name: return "name";
     case Code::Png: return "png";
+    case Code::Time: return "time";
     default: return "busy";
   }
 }
@@ -103,11 +107,12 @@ struct Frame {
   bool hasSession = false;
   bool clockState = false;
   char sessionId[session::MAX_ID_LENGTH + 1] = {};
-  // Decoded title; set only for image frames carrying a valid name. Controls
-  // ignore the name field entirely, exactly like the HTTP lifecycle routes.
+  // Decoded title; set only for image frames carrying a valid name. Lifecycle
+  // controls ignore the name field, exactly like their HTTP counterparts.
   bool hasName = false;
   char projectName[project_name::STORE] = {};
   size_t payloadLength = 0;
+  uint32_t utcSeconds = 0;  // Set only for a validated ClockUtc frame.
 };
 
 // Streaming frame parser. Status is Idle while scanning for magic, Active
@@ -220,9 +225,10 @@ class Parser {
     lastRequestId_ = le16(header_ + 4);
     if (header_[0] != 1) return Code::Version;
     const uint8_t op = header_[1];
-    if (op > 3) return Code::Op;
+    if (op > static_cast<uint8_t>(Op::ClockUtc)) return Code::Op;
+    const bool clockUtc = op == static_cast<uint8_t>(Op::ClockUtc);
     const uint8_t flags = header_[2];
-    if (flags & 0xF8) return Code::Flags;
+    if ((flags & 0xF8) || (clockUtc && flags != 0x01)) return Code::Flags;
     if (header_[3]) return Code::Reserved;
     const bool hasSession = flags & 0x01;
     const bool hasName = flags & 0x02;
@@ -238,6 +244,9 @@ class Parser {
     if (image) {
       if (payloadLen == 0) return Code::Length;
       if (payloadLen > MAX_PNG || payloadLen > capacity_) return Code::Oversize;
+    } else if (clockUtc) {
+      if (payloadLen != sizeof(uint32_t)) return Code::Length;
+      if (payloadLen > capacity_) return Code::Oversize;
     } else if (payloadLen != 0) return Code::Length;
     frame_.op = static_cast<Op>(op);
     frame_.requestId = lastRequestId_;
@@ -265,6 +274,11 @@ class Parser {
     const size_t payloadLen = payloadEnd_ - payloadStart_;
     if (frame_.op == Op::Image && !receiver::validPngEnvelope(payload_, payloadLen))
       return fail(Code::Png);
+    if (frame_.op == Op::ClockUtc) {
+      const uint32_t epoch = le32(payload_);
+      if (epoch < MIN_CLOCK_UTC || epoch > MAX_CLOCK_UTC) return fail(Code::Time);
+      frame_.utcSeconds = epoch;
+    }
     if (frame_.hasSession) {
       const size_t sessionLen = nameStart_ - (HEADER_SIZE - 4);
       std::memcpy(frame_.sessionId, sessionBuf_, sessionLen);

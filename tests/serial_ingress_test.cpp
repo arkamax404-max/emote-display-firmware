@@ -9,6 +9,8 @@
 //       tick <ms>          now += ms; mux.update(now)         → "tick <mode> <status>"
 //       show               → "mode=<> status=<> skipped=<n> req=<id>"
 //       present ok|fail    presentation (PNGdec+render) stand-in
+//       rtc ok|fail        RTC setter stand-in
+//       clockstate         → UTC, settled-frame flag, set and clock paint counts
 //       state              → "owner=<0|1> owned=<id|-> title=<t|-> presented=<n>"
 //
 //   console   ProvisionConsole line protocol in isolation.
@@ -89,7 +91,9 @@ struct Rig {
   diag::Status diag;
   uint32_t now = 1000;
   bool presentOk = true;
-  int presented = 0;
+  bool rtcOk = true, hasFrame = false;
+  uint32_t utc = 0;
+  int presented = 0, rtcSets = 0, clockPaints = 0;
   std::string claimed;
 
   explicit Rig(uint8_t *buffer, size_t capacity)
@@ -106,6 +110,7 @@ struct Rig {
         if (decoded) {
           image_ingress::commitImage(owner, clock, frame, now);
           ++presented;
+          hasFrame = true;
           diag.onImageAccepted(now);
         } else {
           code = serial::Code::Png;
@@ -114,6 +119,18 @@ struct Rig {
       } else {
         diag.onRejected(now);
       }
+    } else if (frame.op == serial::Op::ClockUtc) {
+      code = serial::activateClock(frame, owner, now, [&](uint32_t seconds) {
+        ++rtcSets;
+        if (!rtcOk) return false;
+        utc = seconds;
+        return true;
+      }, [&]() {
+        hasFrame = false;
+        ++clockPaints;
+        diag.onControlAccepted(now);
+      });
+      if (code != serial::Code::Ok) diag.onRejected(now);
     } else {
       code = image_ingress::admitControl(frame, owner, clock, now);
       if (code == serial::Code::Ok) {
@@ -131,6 +148,11 @@ struct Rig {
     diag.onRejected(now);
     std::cout << "nack " << serial::codeName(parser.error()) << ' '
               << parser.lastRequestId() << '\n';
+  }
+
+  void handleRepeatEntry() {
+    serial::printEntryAck([](const char *line) { std::cout << "out " << line << '\n'; });
+    std::cout << "reenter\n";
   }
 
   void handleExit() {
@@ -151,7 +173,7 @@ void pollFrames(Rig &rig, const uint8_t *bytes, size_t length) {
       case serial::Mux::Event::Complete: rig.handleComplete(); break;
       case serial::Mux::Event::Error: rig.handleError(); break;
       case serial::Mux::Event::Exit: rig.handleExit(); break;
-      case serial::Mux::Event::RepeatEntry: std::cout << "reenter\n"; break;
+      case serial::Mux::Event::RepeatEntry: rig.handleRepeatEntry(); break;
       default: break;
     }
   }
@@ -182,7 +204,7 @@ void runMuxScript() {
           case serial::Mux::Event::Complete: rig.handleComplete(); break;
           case serial::Mux::Event::Error: rig.handleError(); break;
           case serial::Mux::Event::Exit: rig.handleExit(); break;
-          case serial::Mux::Event::RepeatEntry: std::cout << "reenter\n"; break;
+          case serial::Mux::Event::RepeatEntry: rig.handleRepeatEntry(); break;
           default: break;
         }
       }
@@ -216,6 +238,14 @@ void runMuxScript() {
       args >> value;
       rig.presentOk = value == "ok";
       std::cout << "present=" << value << '\n';
+    } else if (cmd == "rtc") {
+      std::string value;
+      args >> value;
+      rig.rtcOk = value == "ok";
+      std::cout << "rtc=" << value << '\n';
+    } else if (cmd == "clockstate") {
+      std::cout << "utc=" << rig.utc << " frame=" << rig.hasFrame
+                << " sets=" << rig.rtcSets << " clock-paints=" << rig.clockPaints << '\n';
     } else if (cmd == "state") {
       const char *title = rig.clock.sessionTitle(rig.now);
       std::cout << "owner=" << (rig.owner.active() ? 1 : 0) << " owned="
