@@ -396,6 +396,7 @@ static void pollWeather() {
   // call, which never runs while a station request owns the client) is
   // always allowed to finish rather than abandoned mid-connection.
   if (!weatherOn) return;
+  if (tud_mounted()) return;              // USB host, not a power-only cable
   if (portalActive) return;               // portal/AP mode owns the radio
   if (WiFi.status() != WL_CONNECTED) return;
   if (client) return;                     // a station request is in flight
@@ -571,11 +572,9 @@ static void renderContent() {
                                  uint64_t(esp_timer_get_time() / 1000) % 1000;
     // T4b: the clock and the weather screen alternate over the ABSOLUTE
     // epoch seconds (the same drift-free absolute base the title band
-    // uses), with the configured durations; the weather screen shows only
-    // when a forecast is held in RAM AND not stale. When it is not shown,
-    // the clock render below is byte for byte exactly as before - this
-    // block is the only difference on this path.
-    if (weatherOn && weatherForecast.valid &&
+    // uses), with the configured durations. A mounted USB host suppresses
+    // even a fresh cached forecast without changing the saved setting.
+    if (!tud_mounted() && weatherOn && weatherForecast.valid &&
         !weatherScheduler.stale(millis()) &&
         weather::slotAt(static_cast<uint64_t>(epoch), clockSecs,
                         weatherSecs) == weather::Slot::Weather) {

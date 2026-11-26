@@ -78,7 +78,20 @@ class WeatherWiringTests(unittest.TestCase):
         self.assertLess(loop.index("pollWeather();"),
                         loop.index("pollClock();"))
 
+    def test_usb_host_blocks_forecast_fetch_before_scheduler_tick(self):
+        poll = block(self.source(), "static void pollWeather() {")
+        self.assertLess(poll.index("if (tud_mounted()) return;"),
+                        poll.index("weatherScheduler.tick("))
+
     # --- the alternation ------------------------------------------------------
+
+    def test_usb_host_hides_even_a_cached_forecast(self):
+        render = block(self.source(), "static void renderContent() {")
+        clock = render.split("if (source == idle_clock::Source::Clock)", 1)[1]
+        gate = clock.split("weather_screen::draw(", 1)[0]
+        self.assertIn("if (!tud_mounted() && weatherOn && weatherForecast.valid &&",
+                      gate)
+        self.assertIn("idle_clock::draw(", clock)
 
     def test_alternation_gate_sits_in_front_of_the_untouched_clock(self):
         source = self.source()
